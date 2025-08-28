@@ -502,9 +502,28 @@ def dynamic_doctor_search(search_query: Union[str, dict]) -> dict:
             logger.info(f"🔍 DOCTORS-ONLY: Executing doctor search with criteria: {processed_criteria}")
             doctor_result = unified_doctor_search(processed_criteria)
             
-            # Create result with only doctors data
-            doctors_data = doctor_result.get("data", {}).get("doctors", []) if isinstance(doctor_result, dict) else []
+            # FIX: Correctly extract doctors from the nested response structure
+            doctors_data = []
+            if isinstance(doctor_result, dict):
+                if "response" in doctor_result and "data" in doctor_result["response"]:
+                    # Handle the actual structure: {"response": {"data": [doctors]}}
+                    doctors_data = doctor_result["response"]["data"]
+                    logger.info(f"🔍 DOCTORS-ONLY: Extracted {len(doctors_data)} doctors from response.data")
+                elif "data" in doctor_result and "doctors" in doctor_result["data"]:
+                    # Handle alternative structure: {"data": {"doctors": [doctors]}}
+                    doctors_data = doctor_result["data"]["doctors"]
+                    logger.info(f"🔍 DOCTORS-ONLY: Extracted {len(doctors_data)} doctors from data.doctors")
+                else:
+                    # Fallback: try to find doctors anywhere in the result
+                    doctors_data = doctor_result.get("doctors", [])
+                    if not doctors_data and "data" in doctor_result:
+                        doctors_data = doctor_result["data"]
+                    logger.info(f"🔍 DOCTORS-ONLY: Fallback extraction found {len(doctors_data)} doctors")
+            else:
+                logger.warning(f"🔍 DOCTORS-ONLY: doctor_result is not a dict: {type(doctor_result)}")
+            
             doctors_count = len(doctors_data)
+            logger.info(f"🔍 DOCTORS-ONLY: Final doctors count: {doctors_count}")
             
             result = {
                 "response": {

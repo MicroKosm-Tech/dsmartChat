@@ -713,7 +713,7 @@ def extract_search_criteria_from_message(message: str) -> Dict[str, Any]:
         
         # Prepare prompt for criteria extraction
         system_prompt = """Extract search criteria from the user's message into a structured format. Focus on:
-        - Specialty/type of doctor (e.g., dentist, cardiologist, pediatrician) - ALWAYS in English
+        - Specialty/type of doctor (e.g., dentistry, cardiology, pediatrics) - ALWAYS in English
         - Price range (min and max in SAR) in western numbers
         - Rating requirements (minimum rating out of 5) in western numbers
         - Experience requirements (minimum years) in western numbers
@@ -775,7 +775,7 @@ def extract_search_criteria_from_message(message: str) -> Dict[str, Any]:
              * "خصومات في عيادة التجميل" -> branch_name: "عيادة التجميل"
         
         3. All other fields must be in English:
-           - Specialty: "طبيب أسنان" -> "dentist"
+           - Specialty: "طبيب أسنان" -> "dentistry"
            - Gender: "طبيبة" -> "female", "طبيب" -> "male"
            - Numbers: Use western numerals (1, 2, 3) not Arabic numerals (١، ٢، ٣)
         
@@ -792,7 +792,8 @@ def extract_search_criteria_from_message(message: str) -> Dict[str, Any]:
         5. For specialty and subspecialty detection:
            - ALWAYS detect both specialty and subspecialty when possible
            - For dental-related:
-              * Main specialty is ALWAYS "dentist" or "Dentistry"
+              * Main specialty is ALWAYS "Dentistry"
+              * ALWAYS use the specialty "Dentistry" when dental related terms are mentioned.
               * Look for specific dental subspecialties:
                 - "braces" or "orthodontist" or "teeth alignment" -> subspeciality: "Orthodontics"
                 - "root canal" or "toothache" or "tooth pain" -> subspeciality: "Endodontics"
@@ -825,9 +826,9 @@ def extract_search_criteria_from_message(message: str) -> Dict[str, Any]:
            - "Temporomandibular Joint TMJ Disorders"
         
         7. CRITICALLY IMPORTANT - You MUST include both speciality and subspeciality fields when a specific dental procedure is mentioned:
-           * "I need braces" -> {"speciality": "dentist", "subspeciality": "Orthodontics"}
-           * "I have tooth pain" -> {"speciality": "dentist", "subspeciality": "Endodontics"}
-           * "Where can I get implants" -> {"speciality": "dentist", "subspeciality": "Dental Implants"}
+           * "I need braces" -> {"speciality": "Dentistry", "subspeciality": "Orthodontics"}
+           * "I have tooth pain" -> {"speciality": "Dentistry", "subspeciality": "Endodontics"}
+           * "Where can I get implants" -> {"speciality": "Dentistry", "subspeciality": "Dental Implants"}
         
         8- Make sure you are taking care and giving priority to user intent about what is being searched. for Examples
 		   - Make sure common nouns for hospitals and clinics are stripped both in English and Arabic eg Clinic, Clinics, عيادة, عيادات or any other similar kind of words or pronouns.
