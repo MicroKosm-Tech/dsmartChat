@@ -185,11 +185,11 @@ def build_query(criteria: SearchCriteria) -> Tuple[str, Dict[str, Any]]:
         
         # Execute the stored procedure and log the results
         sp_name = "[dbo].[Sp_IntelligentSearch]"
-        logger.info(f"Executing stored procedure: {sp_name}")
-        logger.info(f"With parameters: {params}")
+        logger.info(f"🔍 DOCTOR SEARCH: Executing stored procedure: {sp_name}")
+        logger.info(f"🔍 DOCTOR SEARCH: With parameters: {params}")
         
         result = db.execute_stored_procedure(sp_name, params)
-        logger.info(f"Database returned result: {json.dumps(result, indent=2)}")
+        logger.info(f"🔍 DOCTOR SEARCH: Database returned result: {json.dumps(result, indent=2)}")
         
         # Return stored procedure name and parameters
         return result
@@ -459,10 +459,15 @@ def unified_doctor_search(search_criteria: Union[dict, str]) -> dict:
         msg = search_criteria["user_message"].lower()
         info_patterns = ["what is", "tell me about", "explain", "information about", "how does", "what are"]
         
+        # ENHANCED: Check if this is asking about a specific doctor (should trigger doctor search)
+        doctor_patterns = ["dr ", "doctor ", "دكتور ", "specialty of", "speciality of"]
+        is_doctor_query = any(pattern in msg for pattern in doctor_patterns)
+        
         if any(pattern in msg for pattern in info_patterns):
             action_words = ["find", "book", "need", "looking for", "search for", "want", "recommend", "suggest"]
             # If it contains info words but no action words, it's likely just an info request
-            if not any(action in msg for action in action_words):
+            # BUT if it's asking about a specific doctor, we should still search
+            if not any(action in msg for action in action_words) and not is_doctor_query:
                 logger.info(f"Detected information request without doctor search: '{msg}'")
                 is_info_request = True
                 
@@ -479,6 +484,8 @@ def unified_doctor_search(search_criteria: Union[dict, str]) -> dict:
                     "display_results": False,
                     "doctor_count": 0
                 }
+            elif is_doctor_query:
+                logger.info(f"Detected doctor-specific query: '{msg}' - Will proceed with doctor search")
     
     # Handle different input types
     if isinstance(search_criteria, str):
@@ -648,17 +655,19 @@ def unified_doctor_search(search_criteria: Union[dict, str]) -> dict:
         logger.warning("UNIFIED_SEARCH: Using empty SearchCriteria as fallback")
     
     # Build and execute query
-    logger.info(f"Building query with criteria: {criteria.dict()}")
+    logger.info(f"🔍 DOCTOR SEARCH: Building query with criteria: {criteria.dict()}")
     try:
+        logger.info(f"🔍 DOCTOR SEARCH: About to call build_query function")
         result = build_query(criteria)
+        logger.info(f"🔍 DOCTOR SEARCH: build_query completed successfully")
         
         # Process results
         if result and "data" in result and "doctors" in result["data"]:
             doctors = result["data"]["doctors"]
-            logger.info(f"UNIFIED_SEARCH: Found {len(doctors)} doctors")
-            logger.info(f"UNIFIED_SEARCH: Returning result with {len(doctors)} doctors")
+            logger.info(f"🔍 DOCTOR SEARCH: Found {len(doctors)} doctors")
+            logger.info(f"🔍 DOCTOR SEARCH: Returning result with {len(doctors)} doctors")
         else:
-            logger.warning("UNIFIED_SEARCH: No doctors found in result")
+            logger.warning("🔍 DOCTOR SEARCH: No doctors found in result")
             result = {"data": {"doctors": []}}
         
         return {
