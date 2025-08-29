@@ -396,12 +396,23 @@ def dynamic_doctor_search(search_query: Union[str, dict]) -> dict:
         doctors_only_keywords = [
             # English keywords
             "doctors only", "specialists only", "find doctor", "need doctor", "looking for doctor",
+            "dr ", "doctor ", "specialty of", "what is the specialty", "tell me about dr",
             # Arabic keywords
-            "أطباء فقط", "دكتور فقط", "أحتاج طبيب", "أبحث عن طبيب", "مختص فقط"
+            "أطباء فقط", "دكتور فقط", "أحتاج طبيب", "أبحث عن طبيب", "مختص فقط", "دكتور ", "تخصص"
         ]
         
         is_offers_only = any(keyword in user_message for keyword in offers_keywords)
         is_doctors_only = any(keyword in user_message for keyword in doctors_only_keywords)
+        
+        # ENHANCED: Check for doctor name patterns (e.g., "dr omar", "doctor ahmed")
+        import re
+        doctor_name_pattern = r'\b(?:dr|doctor|دكتور)\s+\w+'
+        has_doctor_name = bool(re.search(doctor_name_pattern, user_message, re.IGNORECASE))
+        
+        # If we detect a doctor name, prioritize doctor search
+        if has_doctor_name:
+            is_doctors_only = True
+            logger.info(f"🔍 [dynamic_doctor_search] Doctor name pattern detected: '{user_message}' - Setting doctors_only=True")
         
         if is_offers_only:
             logger.info(f"🎁 OFFERS-ONLY QUERY DETECTED: '{user_message}'")
@@ -471,7 +482,8 @@ def dynamic_doctor_search(search_query: Union[str, dict]) -> dict:
         
         # If this is a doctors-only query, skip offers search and only do doctor search
         if is_doctors_only:
-            logger.info(f"🔍 DOCTORS-ONLY MODE: Skipping offers search")
+            logger.info(f"🔍 DOCTORS-ONLY MODE: Skipping offers search - Query: '{user_message}'")
+            logger.info(f"🔍 DOCTORS-ONLY MODE: Reason: {'Doctor name pattern detected' if has_doctor_name else 'Keywords matched'}")
             
             # Extract search criteria for doctors search
             if isinstance(search_query, str):
@@ -498,8 +510,25 @@ def dynamic_doctor_search(search_query: Union[str, dict]) -> dict:
                 search_criteria = search_query
                 processed_criteria = search_query
             
+            # CRITICAL FIX: For doctor name searches, clear specialty fields to avoid incorrect filtering
+            if processed_criteria and "doctor_name" in processed_criteria:
+                if "speciality" in processed_criteria:
+                    logger.info(f"🔍 DOCTORS-ONLY: Clearing incorrect specialty '{processed_criteria['speciality']}' for doctor name search")
+                    processed_criteria.pop("speciality", None)
+                if "subspeciality" in processed_criteria:
+                    logger.info(f"🔍 DOCTORS-ONLY: Clearing incorrect subspecialty '{processed_criteria['subspeciality']}' for doctor name search")
+                    processed_criteria.pop("subspeciality", None)
+                logger.info(f"🔍 DOCTORS-ONLY: Final criteria after clearing specialties: {processed_criteria}")
+            
             # Execute doctor search only
             logger.info(f"🔍 DOCTORS-ONLY: Executing doctor search with criteria: {processed_criteria}")
+            
+            # DEBUG: Check if specialty fields are incorrectly set
+            if "speciality" in processed_criteria:
+                logger.warning(f"🔍 DOCTORS-ONLY: WARNING - specialty field contains '{processed_criteria['speciality']}' - this should be cleared for doctor name searches")
+            if "subspeciality" in processed_criteria:
+                logger.warning(f"🔍 DOCTORS-ONLY: WARNING - subspecialty field contains '{processed_criteria['subspeciality']}' - this should be cleared for doctor name searches")
+            
             doctor_result = unified_doctor_search(processed_criteria)
             
             # FIX: Correctly extract doctors from the nested response structure
@@ -558,7 +587,12 @@ def dynamic_doctor_search(search_query: Union[str, dict]) -> dict:
                     logger.info(f"Using coordinates from search params: lat={criteria_dict['latitude']}, long={criteria_dict['longitude']}")
                 
                 logger.info(f"Calling unified_doctor_search with criteria: {criteria_dict}")
-                doctor_result = unified_doctor_search(criteria_dict)
+                try:
+                    doctor_result = unified_doctor_search(criteria_dict)
+                    logger.info(f"🔍 [dynamic_doctor_search] unified_doctor_search completed successfully")
+                except Exception as e:
+                    logger.error(f"🔍 [dynamic_doctor_search] Error in unified_doctor_search: {str(e)}")
+                    doctor_result = None
                 
                 # Extract processed criteria from the result or use original criteria
                 processed_criteria = criteria_dict
@@ -584,7 +618,12 @@ def dynamic_doctor_search(search_query: Union[str, dict]) -> dict:
                 search_criteria = search_params
                 
                 logger.info(f"Calling unified_doctor_search with text and coordinates: {search_params}")
-                doctor_result = unified_doctor_search(search_params)
+                try:
+                    doctor_result = unified_doctor_search(search_params)
+                    logger.info(f"🔍 [dynamic_doctor_search] unified_doctor_search completed successfully")
+                except Exception as e:
+                    logger.error(f"🔍 [dynamic_doctor_search] Error in unified_doctor_search: {str(e)}")
+                    doctor_result = None
                 
                 # For natural language queries, we need to extract the processed criteria
                 # The unified_doctor_search processes the criteria but doesn't return it
@@ -594,19 +633,52 @@ def dynamic_doctor_search(search_query: Union[str, dict]) -> dict:
             # Handle direct dictionary input
             logger.info(f"Using provided dictionary: {search_query}")
             search_criteria = search_query
-            doctor_result = unified_doctor_search(search_query)
+            try:
+                doctor_result = unified_doctor_search(search_query)
+                logger.info(f"🔍 [dynamic_doctor_search] unified_doctor_search completed successfully")
+            except Exception as e:
+                logger.error(f"🔍 [dynamic_doctor_search] Error in unified_doctor_search: {str(e)}")
+                doctor_result = None
             processed_criteria = search_query
+        
+        # CRITICAL FIX: Ensure doctor search results are properly captured before proceeding
+        logger.info(f"🔍 [dynamic_doctor_search] Doctor search completed, result type: {type(doctor_result)}")
+        if doctor_result:
+            logger.info(f"🔍 [dynamic_doctor_search] Doctor search returned: {str(doctor_result)[:200]}...")
+            # Ensure doctor_result has the expected structure
+            if isinstance(doctor_result, dict) and "response" in doctor_result:
+                logger.info(f"🔍 [dynamic_doctor_search] Doctor result has proper response structure")
+            else:
+                logger.warning(f"🔍 [dynamic_doctor_search] Doctor result missing proper response structure")
+        else:
+            logger.warning(f"🔍 [dynamic_doctor_search] Doctor search returned None or empty result")
         
         # Execute offers search in parallel if we have search criteria (skip for offers-only and doctors-only queries)
         offers_result = None
         if processed_criteria and not is_offers_only and not is_doctors_only:
             logger.info("🎁 Starting parallel offers search with processed criteria")
+            logger.info(f"🎁 PARALLEL MODE: Query '{user_message}' - No specific mode detected, running both doctor search and offers search")
+        else:
+            if is_doctors_only:
+                logger.info(f"🔍 SKIPPING PARALLEL: Query '{user_message}' - Doctors-only mode detected")
+            elif is_offers_only:
+                logger.info(f"🎁 SKIPPING PARALLEL: Query '{user_message}' - Offers-only mode detected")
             logger.info(f"🎁 Processed criteria: {processed_criteria}")
             
             # Extract the properly processed criteria using the helper function
             # This ensures we get the same processed criteria that unified_doctor_search uses
             final_processed_criteria = extract_processed_criteria(processed_criteria)
             logger.info(f"🎁 Final processed criteria for offers: {final_processed_criteria}")
+            
+            # CRITICAL FIX: For doctor name searches, clear specialty fields to avoid incorrect filtering
+            if final_processed_criteria and "doctor_name" in final_processed_criteria:
+                if "speciality" in final_processed_criteria:
+                    logger.info(f"🎁 PARALLEL: Clearing incorrect specialty '{final_processed_criteria['speciality']}' for doctor name search")
+                    final_processed_criteria.pop("speciality", None)
+                if "subspeciality" in final_processed_criteria:
+                    logger.info(f"🎁 PARALLEL: Clearing incorrect subspecialty '{final_processed_criteria['subspeciality']}' for doctor name search")
+                    final_processed_criteria.pop("subspeciality", None)
+                logger.info(f"🎁 PARALLEL: Final criteria after clearing specialties: {final_processed_criteria}")
             
             # Create a thread for offers search with better error handling
             # Use a shared variable instead of thread_local for better communication
@@ -654,6 +726,18 @@ def dynamic_doctor_search(search_query: Union[str, dict]) -> dict:
                 logger.info(f"🎁 [dynamic_doctor_search] No offers_result to add")
         elif is_offers_only:
             logger.info("🎁 OFFERS-ONLY MODE: Skipping parallel offers search (already done)")
+        else:
+            # CRITICAL FIX: Handle case where doctor search failed or returned no results
+            logger.warning(f"🔍 [dynamic_doctor_search] No doctor_result found, creating fallback result")
+            result = {
+                "response": {
+                    "message": "I couldn't find the specific doctor information you requested, but here are some offers in your area.",
+                    "data": [],
+                    "is_doctor_search": True,
+                    "doctor_count": 0
+                },
+                "display_results": False
+            }
         
         # Ensure proper formatting of result (now with offers included)
         result = ensure_proper_doctor_search_format(result, str(search_query))
