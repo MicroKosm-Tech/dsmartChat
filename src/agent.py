@@ -301,10 +301,10 @@ IMPORTANT RESPONSE RULES (CRITICAL):
   - Use age to select appropriate subspecialty (e.g., for a child, use specialty: "Dentistry", subspecialty: "Pediatric Dentistry").
   - If user requests "show more" , "show more options" or similar terms in any language, execute the search_doctors_dynamic tool again with the params from the context.
   - Whenever user mentions about doctors, you need to execute the search_doctors_dynamic tool and show the information of the doctors that you get from the tool result. Never show the doctor information without executing the tool.
-  - If no results found for specific doctor/clinic, execute again with only location (lat/long) and respond: "I couldn’t find your exact request, but here are other doctors near you."
+  - If no results found for specific doctor/clinic, execute again with only location (lat/long) and respond: "I couldn't find your exact request, but here are other doctors near you."
   - For "doctors near me" or "offers near me" or "أطباء بالقرب مني" or "عروض بالقرب مني" without specifics, execute with location only.
   - For booking/appointment mentions, execute with relevant parameters and say: "Use the 'Book Appointment', "احجز موعدًا" button on the doctor card to book in the chat or visit dsmart.ai for booking."
-  - Never execute without specialty unless it’s a direct location-based request.
+  - Never execute without specialty unless it's a direct location-based request.
 
 🔄 CONVERSATION FLOW HANDLING
 
@@ -380,7 +380,7 @@ IMPORTANT RESPONSE RULES (CRITICAL):
 -Confirmations after symptom analysis (e.g., "yes," "okay," "please" , "أجل", "أوكي", "يمكن", "نعم") using specialty/subspecialty from [analyze_symptoms].
 -Health concern information requests (e.g., "Tell me about braces", "أخبرني عن تقويم الأسنان") after providing information, using [analyze_symptoms] results.
 -Execute silently without announcing the search or implying waiting. Respond ONLY with formatted results (e.g., "Here are dentists near you: [list results].") or a clarifying question if input is ambiguous.
--If no results found, execute again with location only and respond: "I couldn’t find your exact request, but here are other doctors near you: [list results]."
+-If no results found, execute again with location only and respond: "I couldn't find your exact request, but here are other doctors near you: [list results]."
 - If no results in a list found, dont respond with doctor information instead respond with a question of finding some other options related to the search.
 -For bookings/appointments, execute with relevant parameters and include: "Use the 'Book Appointment' button on dsmart.ai to book."
 -Never include tool calls or execution details in user-facing responses.
@@ -813,9 +813,101 @@ class SimpleMedicalAgent:
         self.messages_by_session = {}  # Track message history by session
         logger.info("✅ SimpleMedicalAgent initialized successfully")
 
-        def get_llm(self):
-            # Return the language model to use for standard interactions
-            return client
+    def get_llm(self):
+        # Return the language model to use for standard interactions
+        return client
+
+    def post_process_response(self, response_content: str) -> str:
+        """
+        Post-process the response to remove tool call names and other technical artifacts.
+        
+        Args:
+            response_content: The raw response content from the AI
+            
+        Returns:
+            str: Cleaned response content without tool call references
+        """
+        if not response_content:
+            return response_content
+            
+        # Remove tool call patterns like [Tool: tool_name...] or [tool_name: ...]
+        import re
+        
+        # Pattern 1: [Tool: tool_name...] or [tool_name...]
+        response_content = re.sub(r'\[Tool:\s*[^\]]+\]', '', response_content)
+        response_content = re.sub(r'\[[a-zA-Z_][a-zA-Z0-9_]*\s*:[^\]]*\]', '', response_content)
+        
+        # Pattern 2: Remove standalone tool names in brackets
+        response_content = re.sub(r'\[[a-zA-Z_][a-zA-Z0-9_]*\]', '', response_content)
+        
+        # Pattern 3: Remove tool execution mentions like "I will call [tool_name]"
+        response_content = re.sub(r'I\s+will\s+call\s+\[[^\]]+\]', 'I will help you', response_content)
+        response_content = re.sub(r'I\s+am\s+calling\s+\[[^\]]+\]', 'I am helping you', response_content)
+        
+        # Pattern 4: Remove "using [tool_name]" patterns
+        response_content = re.sub(r'using\s+\[[^\]]+\]', '', response_content)
+        
+        # Pattern 5: Remove "through [tool_name]" patterns
+        response_content = re.sub(r'through\s+\[[^\]]+\]', '', response_content)
+        
+        # Pattern 6: Remove "via [tool_name]" patterns
+        response_content = re.sub(r'via\s+\[[^\]]+\]', '', response_content)
+        
+        # Pattern 7: Remove "with [tool_name]" patterns
+        response_content = re.sub(r'with\s+\[[^\]]+\]', '', response_content)
+        
+        # Pattern 8: Remove "by [tool_name]" patterns
+        response_content = re.sub(r'by\s+\[[^\]]+\]', '', response_content)
+        
+        # Pattern 9: Remove "from [tool_name]" patterns
+        response_content = re.sub(r'from\s+\[[^\]]+\]', '', response_content)
+        
+        # Pattern 10: Remove "for [tool_name]" patterns
+        response_content = re.sub(r'for\s+\[[^\]]+\]', '', response_content)
+        
+        # Pattern 11: Remove any remaining tool-like patterns with common verbs
+        response_content = re.sub(r'(?:will|am|going to|plan to|intend to)\s+(?:use|utilize|employ|execute|run|call|invoke)\s+\[[^\]]+\]', 'will help you', response_content)
+        
+        # Pattern 12: Remove any remaining tool execution language
+        response_content = re.sub(r'(?:I\s+)?(?:will|am|going to|plan to|intend to)\s+(?:execute|run|perform|carry out)\s+\[[^\]]+\]', 'I will help you', response_content)
+        
+        # Pattern 13: Remove any remaining tool parameter references
+        response_content = re.sub(r'\[[^\]]*parameter[^\]]*\]', '', response_content)
+        response_content = re.sub(r'\[[^\]]*argument[^\]]*\]', '', response_content)
+        
+        # Pattern 14: Remove consecutive tool names in brackets (e.g., [tool1] [tool2] [tool3])
+        response_content = re.sub(r'(\[\s*[a-zA-Z_][a-zA-Z0-9_]*\s*\]\s*)+', '', response_content)
+        
+        # Clean up extra whitespace and punctuation
+        response_content = re.sub(r'\s+', ' ', response_content)  # Multiple spaces to single space
+        response_content = re.sub(r'\s*,\s*,', ',', response_content)  # Remove double commas
+        response_content = re.sub(r'\s*\.\s*\.', '.', response_content)  # Remove double periods
+        response_content = re.sub(r'^\s+', '', response_content)  # Remove leading whitespace
+        response_content = re.sub(r'\s+$', '', response_content)  # Remove trailing whitespace
+        
+        # Fix common sentence structure issues
+        response_content = re.sub(r'^\s*,\s*', '', response_content)  # Remove leading comma
+        response_content = re.sub(r'^\s*\.\s*', '', response_content)  # Remove leading period
+        response_content = re.sub(r'\s*,\s*$', '.', response_content)  # Replace trailing comma with period
+        response_content = re.sub(r'\s*\.\s*$', '.', response_content)  # Ensure trailing period
+        
+        # Ensure the response starts with a capital letter
+        if response_content and response_content[0].islower():
+            response_content = response_content[0].upper() + response_content[1:]
+        
+        # Final cleanup: Remove any remaining isolated brackets or tool-like text
+        response_content = re.sub(r'\s*\[\s*\]', '', response_content)  # Remove empty brackets
+        response_content = re.sub(r'\s*\[\s*[a-zA-Z_][a-zA-Z0-9_]*\s*\]', '', response_content)  # Remove any remaining tool names in brackets
+        
+        # Final whitespace cleanup
+        response_content = re.sub(r'\s+', ' ', response_content)
+        response_content = response_content.strip()
+        
+        # Ensure we don't return an empty string
+        if not response_content or response_content.isspace():
+            response_content = "I'm here to help you with your healthcare needs."
+            
+        return response_content
 
     def sync_session_history(self, session_id):
         """Synchronize OpenAI messages with session history"""
@@ -2142,6 +2234,10 @@ Generate a natural, helpful response that follows this strategy and incorporates
 
                     final_response_content = final_response.choices[0].message.content
 
+                    # Post-process the response to remove tool call names and technical artifacts
+                    final_response_content = self.post_process_response(final_response_content)
+                    logger.info(f"🔄 Post-processed response: {final_response_content[:100]}...")
+
                     # CRITICAL: Add the final context message and AI response to conversation history
                     # This ensures the main agent maintains full context between messages
                     logger.info(f"🔄 Adding final context message and AI response to conversation history")
@@ -2222,6 +2318,10 @@ Generate a natural, helpful response that follows this strategy and incorporates
                     # Add the assistant message to history
                     content = response_message.content
                     if content:
+                        # Post-process the response to remove tool call names and technical artifacts
+                        content = self.post_process_response(content)
+                        logger.info(f"🔄 Post-processed direct response: {content[:100]}...")
+                        
                         messages.append({"role": "assistant", "content": content})
                         history.add_ai_message(content)
                         
