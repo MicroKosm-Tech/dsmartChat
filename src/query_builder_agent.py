@@ -62,6 +62,44 @@ class SearchCriteria(BaseModel):
             return {k: v for k, v in result.items() if v is not None}
         return result
 
+def clean_subspeciality(subspeciality: str) -> str:
+    """
+    Extract only the first subspeciality before any comma.
+    This ensures we pass only one subspeciality to the stored procedure.
+    
+    Args:
+        subspeciality: The subspeciality string that may contain commas
+        
+    Returns:
+        Cleaned subspeciality string with only the first part before comma
+    """
+    if not subspeciality:
+        return subspeciality
+    
+    # Validate input type
+    if not isinstance(subspeciality, str):
+        logger.error(f"Invalid subspeciality type: {type(subspeciality)}, expected str")
+        return str(subspeciality) if subspeciality else ""
+    
+    # Split by comma and take only the first part
+    first_part = subspeciality.split(',')[0]
+    
+    # Clean up whitespace
+    cleaned = first_part.strip()
+    
+    # Validate cleaned result
+    if not cleaned:
+        logger.warning(f"Subspeciality became empty after cleaning: '{subspeciality}'")
+        return ""
+    
+    # Log the cleaning process for debugging
+    if ',' in subspeciality:
+        logger.info(f"🧹 Cleaned subspeciality: '{subspeciality}' -> '{cleaned}' (removed comma-separated parts)")
+    else:
+        logger.info(f"🧹 Subspeciality already clean: '{subspeciality}'")
+    
+    return cleaned
+
 def build_query(criteria: SearchCriteria) -> Tuple[str, Dict[str, Any]]:
     """
     Build parameters for Sp_IntelligentSearch stored procedure
@@ -80,7 +118,8 @@ def build_query(criteria: SearchCriteria) -> Tuple[str, Dict[str, Any]]:
         if criteria.speciality:
             logger.info(f"DEBUG: Using specialty '{criteria.speciality}' in WHERE clause")
             if criteria.subspeciality:
-                logger.info(f"DEBUG: Using subspecialty '{criteria.subspeciality}' in WHERE clause")
+                cleaned_subspeciality = clean_subspeciality(criteria.subspeciality)
+                logger.info(f"DEBUG: Using subspecialty '{criteria.subspeciality}' -> cleaned to '{cleaned_subspeciality}' in WHERE clause")
         else:
             logger.warning("DEBUG: No specialty found in search criteria!")
         
@@ -117,11 +156,12 @@ def build_query(criteria: SearchCriteria) -> Tuple[str, Dict[str, Any]]:
             specialty_value = criteria.speciality.replace("'", "''")
             
             if criteria.subspeciality:
-                # When both specialty and subspecialty are present
-                subspecialty_value = criteria.subspeciality.replace("'", "''")
+                # Clean subspeciality to get only first part before comma
+                cleaned_subspeciality = clean_subspeciality(criteria.subspeciality)
+                subspecialty_value = cleaned_subspeciality.replace("'", "''")
                 
                 # Use a combined search that looks for the specialty in the Specialty field
-                # and the subspecialty in the Subspecialities field
+                # and the cleaned subspecialty in the Subspecialities field
                 where_conditions.append(f"AND (le.Specialty LIKE N'%{specialty_value}%' AND s.SubSpeciality LIKE N'%{subspecialty_value}%')")
                 logger.info(f"Added combined specialty+subspecialty filter: (le.Specialty LIKE N'%{specialty_value}%' AND s.SubSpeciality LIKE N'%{subspecialty_value}%')")
             else:
@@ -131,19 +171,21 @@ def build_query(criteria: SearchCriteria) -> Tuple[str, Dict[str, Any]]:
         
         # Handle subspecialty without specialty (rare case)
         elif criteria.subspeciality:
-            subspecialty_value = criteria.subspeciality.replace("'", "''")
+            # Clean subspeciality to get only first part before comma
+            cleaned_subspeciality = clean_subspeciality(criteria.subspeciality)
+            subspecialty_value = cleaned_subspeciality.replace("'", "''")
             
             # If it's likely a dental subspecialty, assume dentist as the specialty
             dental_subspecialties = ["Orthodontics", "Endodontics", "Periodontics", "Dental Implants", 
                                      "Prosthodontics", "Oral Surgery", "Oral and Maxillofacial Surgery",
                                      "Pediatric Dentistry", "GP", "Dental Hygienist"]
             
-            if criteria.subspeciality in dental_subspecialties:
-                # For dental subspecialties, search for dentistry in Specialty and the subspecialty in Subspecialities
+            if cleaned_subspeciality in dental_subspecialties:
+                # For dental subspecialties, search for dentistry in Specialty and the cleaned subspecialty in Subspecialities
                 where_conditions.append(f"AND (le.Specialty LIKE N'%dentist%' AND s.SubSpeciality LIKE N'%{subspecialty_value}%')")
                 logger.info(f"Added dental subspecialty filter: (le.Specialty LIKE N'%dentist%' AND s.SubSpeciality LIKE N'%{subspecialty_value}%')")
             else:
-                # For non-dental subspecialties, just search for the subspecialty in the Subspecialities field
+                # For non-dental subspecialties, just search for the cleaned subspecialty in the Subspecialities field
                 where_conditions.append(f"AND (s.SubSpeciality LIKE N'%{subspecialty_value}%')")
                 logger.info(f"Added subspecialty-only filter: (s.SubSpeciality LIKE N'%{subspecialty_value}%')")
         
@@ -1102,4 +1144,4 @@ def extract_search_criteria_tool(user_query: str) -> Dict[str, Any]:
         }
 
 # Export all necessary functions
-__all__ = ['SearchCriteria', 'unified_doctor_search', 'unified_doctor_search_tool', 'extract_search_criteria_tool'] 
+__all__ = ['SearchCriteria', 'clean_subspeciality', 'unified_doctor_search', 'unified_doctor_search_tool', 'extract_search_criteria_tool'] 
