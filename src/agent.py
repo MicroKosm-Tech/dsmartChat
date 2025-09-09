@@ -1192,7 +1192,7 @@ class SimpleMedicalAgent:
                 logger.info(f"🔍 DEBUG: lat={lat}, long={long} before AI call")
                 
                 response = client.chat.completions.create(
-                    model="gpt-4o-mini-2024-07-18",
+                    model="gpt-4.1-2025-04-14",
                     messages=messages,
                     tools=self.tools,
                     tool_choice="auto",
