@@ -63,7 +63,7 @@ class DB:
             # Create SQLAlchemy connection string
             connection_string = f"mssql+pyodbc:///?odbc_connect={params}"
 
-            test_db_url = "mssql+pyodbc://@(localdb)\\MSSQLLocalDB/DSmart_Prod_new?driver=ODBC+Driver+17+for+SQL+Server&trusted_connection=yes"
+            test_db_url = "mssql+pyodbc://@(localdb)\\MSSQLLocalDB/DSmart_Dev?driver=ODBC+Driver+17+for+SQL+Server&trusted_connection=yes"
 
             
             # Configure connection pooling for better performance

@@ -1,5 +1,6 @@
 import os
 import logging
+import re
 from typing import Dict, List, Optional, Tuple, Any, Union
 from pydantic import BaseModel
 from sqlalchemy import text
@@ -11,6 +12,7 @@ import time
 from openai import OpenAI
 import uuid
 import json
+from jellyfish import metaphone
 
 
 # Initialize thread_local storage
@@ -100,6 +102,36 @@ def clean_subspeciality(subspeciality: str) -> str:
     
     return cleaned
 
+def generate_sound_name(name: str) -> str:
+    """Generate sound name using metaphone phonetic encoding."""
+    if not name or not name.strip():
+        return ""
+    
+    words = name.split()
+    phonetic_codes = [metaphone(word) for word in words]
+    return ' '.join(phonetic_codes)
+
+def clean_and_generate_sound_name(user_input: str) -> str:
+    """Clean user input and generate sound name for database matching."""
+    if not user_input:
+        return ""
+    
+    # Remove doctor prefixes
+    prefixes_to_remove = ['dr.', 'dr', 'doctor', 'prof.', 'prof', 'professor']
+    name_lower = user_input.lower().strip()
+    
+    for prefix in prefixes_to_remove:
+        if name_lower.startswith(prefix + ' '):
+            user_input = user_input[len(prefix):].strip()
+            break
+        elif name_lower.startswith(prefix):
+            user_input = user_input[len(prefix):].strip()
+            break
+    
+    cleaned_name = ' '.join(user_input.split())
+    return generate_sound_name(cleaned_name)
+
+
 def build_query(criteria: SearchCriteria) -> Tuple[str, Dict[str, Any]]:
     """
     Build parameters for Sp_IntelligentSearch stored procedure
@@ -137,9 +169,9 @@ def build_query(criteria: SearchCriteria) -> Tuple[str, Dict[str, Any]]:
         #     #where_conditions.append(f"AND (bg.BranchName_en LIKE N'%{branch_name}%' OR bg.BranchName_ar LIKE N'%{branch_name}%')")
         #    where_conditions.append( f"""AND (SELECT STRING_AGG( N'(bg.BranchName_en LIKE N''%'+ value + N'%'' OR bg.BranchName_ar LIKE N''%'+ value + N'%'' )', N' AND ')FROM STRING_SPLIT(N'{branch_name}', N' ')) = (N'(bg.BranchName_en LIKE N''%{branch_name}%'' OR bg.BranchName_ar LIKE N''%{branch_name}%'')')""")
 
-        # Doctor name search (high priority)
+        # Doctor name search (high priority) - using sound name for phonetic matching
         if criteria.doctor_name:
-            where_conditions.append(build_multi_word_like_clause("le.DocName", criteria.doctor_name))
+            where_conditions.append(build_doctor_sound_name_clause(criteria.doctor_name))
 
         # Hospital/branch name search
         if criteria.branch_name:
@@ -258,6 +290,31 @@ def build_multi_word_like_clause(field_prefix: str, phrase: str) -> str:
         f"({field_prefix}_en LIKE N'%{word}%' OR {field_prefix}_ar LIKE N'%{word}%')" for word in words
     ]
     return "AND (" + " AND ".join(conditions) + ")"
+
+def build_doctor_sound_name_clause(doctor_name: str) -> str:
+    """
+    Build a WHERE clause for doctor name search using the Name_Sound field.
+    This function generates the sound name and creates a LIKE clause for phonetic matching.
+
+    :param doctor_name: The doctor name to search for
+    :return: A string like: AND (le.Name_Sound LIKE N'SOUND_NAME')
+    """
+    if not doctor_name or not doctor_name.strip():
+        return ""
+    
+    # Generate sound name for the doctor name
+    sound_name = clean_and_generate_sound_name(doctor_name)
+    
+    if not sound_name:
+        logger.warning(f"Could not generate sound name for doctor: '{doctor_name}'")
+        return ""
+    
+    # Escape single quotes in sound name for T-SQL
+    safe_sound_name = sound_name.replace("'", "''").strip()
+    
+    logger.info(f"🔊 DOCTOR SOUND SEARCH: Original='{doctor_name}' -> Sound='{sound_name}'")
+    
+    return f"AND (le.DocName_en LIKE N'%{doctor_name}%' OR le.Name_Sound LIKE N'%{safe_sound_name}%' )"
 
 def normalize_specialty(specialty_name: str) -> dict:
     """
@@ -768,13 +825,14 @@ def extract_search_criteria_from_message(message: str) -> Dict[str, Any]:
         - Price range (min and max in SAR) in western numbers
         - Rating requirements (minimum rating out of 5) in western numbers
         - Experience requirements (minimum years) in western numbers
-        - Doctor name if mentioned (with title Dr/Doctor removed) - KEEP in original language (Arabic/English)
+        - Doctor name if mentioned (with title Dr/Doctor removed) - ALWAYS convert to English for phonetic matching
         - Clinic/branch name if mentioned - KEEP in original language (Arabic/English)
         - Gender preference ('male' or 'female' doctor) - ALWAYS in English
         
         IMPORTANT RULES:
         1. Doctor names and branch names:
-           - Keep in original language (Arabic or English)
+           - Doctor names: ALWAYS convert to English for phonetic matching (even if mentioned in Arabic)
+           - Branch names: Keep in original language (Arabic or English)
            - Remove titles like "Dr.", "Doctor", "الدكتور", "دكتور", "د.", "دكتر", "دكتوره", "دكتورة"
            - For Arabic names, pay special attention to these patterns:
              * "الدكتور [name]" -> extract "[name]"
@@ -794,20 +852,21 @@ def extract_search_criteria_from_message(message: str) -> Dict[str, Any]:
              * "عايز [name]" -> extract "[name]" (if context suggests it's a doctor)
              * "عند [name]" -> extract "[name]" (if context suggests it's a doctor)
              * "مع [name]" -> extract "[name]" (if context suggests it's a doctor)
-           - Examples:
+           - Examples for doctor names (convert Arabic to English):
              * "Dr. Smith" -> "Smith"
-             * "الدكتور أحمد" -> "أحمد"
-             * "دكتور محمد" -> "محمد"
-             * "ابحث عن الدكتور الغريب" -> "الغريب"
-             * "اريد الدكتور يوسف" -> "يوسف"
-             * "عايز الدكتور علي" -> "علي"
-             * "عند الدكتور خالد" -> "خالد"
-             * "مع الدكتور سعيد" -> "سعيد"
-             * "ابحث عن الغريب" -> "الغريب"
-             * "اريد يوسف" -> "يوسف"
-             * "عايز علي" -> "علي"
-             * "عند خالد" -> "خالد"
-             * "مع سعيد" -> "سعيد"
+             * "الدكتور أحمد" -> "Ahmed" (convert Arabic to English)
+             * "دكتور محمد" -> "Mohammed" (convert Arabic to English)
+             * "ابحث عن الدكتور الغريب" -> "Alghareeb" (convert Arabic to English)
+             * "اريد الدكتور يوسف" -> "Youssef" (convert Arabic to English)
+             * "عايز الدكتور علي" -> "Ali" (convert Arabic to English)
+             * "عند الدكتور خالد" -> "Khalid" (convert Arabic to English)
+             * "مع الدكتور سعيد" -> "Saeed" (convert Arabic to English)
+             * "ابحث عن الغريب" -> "Alghareeb" (convert Arabic to English)
+             * "اريد يوسف" -> "Youssef" (convert Arabic to English)
+             * "عايز علي" -> "Ali" (convert Arabic to English)
+             * "عند خالد" -> "Khalid" (convert Arabic to English)
+             * "مع سعيد" -> "Saeed" (convert Arabic to English)
+           - Examples for branch names (keep original language):
              * "مستشفى الملك فهد" -> "مستشفى الملك فهد"
              * "King Fahd Hospital" -> "King Fahd Hospital"
         
@@ -893,7 +952,7 @@ def extract_search_criteria_from_message(message: str) -> Dict[str, Any]:
             "max_price": number,
             "min_rating": number,
             "min_experience": number,
-            "doctor_name": "name (in original language)",
+            "doctor_name": "name (in English for phonetic matching)",
             "branch_name": "name (in original language)",
             "gender": "male" or "female"
         }
@@ -948,6 +1007,16 @@ def extract_search_criteria_from_message(message: str) -> Dict[str, Any]:
                 
                 if original_name != extracted["doctor_name"]:
                     root_logger.info(f"\n🔄 Cleaned doctor name: '{original_name}' -> '{extracted['doctor_name']}'")
+                
+                # Generate and print sound name for debugging
+                sound_name = clean_and_generate_sound_name(extracted["doctor_name"])
+                print(f"\n🔊 SOUND NAME GENERATION:")
+                print(f"   Original name: '{extracted['doctor_name']}'")
+                print(f"   Sound name: '{sound_name}'")
+                print(f"🔊 END SOUND NAME GENERATION\n")
+                
+                # Log the sound name generation
+                root_logger.info(f"🔊 SOUND NAME: Original='{extracted['doctor_name']}' -> Sound='{sound_name}'")
             
             # Check if we found subspecialty without specialty
             if "subspeciality" in extracted and "speciality" not in extracted:
@@ -1144,4 +1213,4 @@ def extract_search_criteria_tool(user_query: str) -> Dict[str, Any]:
         }
 
 # Export all necessary functions
-__all__ = ['SearchCriteria', 'clean_subspeciality', 'unified_doctor_search', 'unified_doctor_search_tool', 'extract_search_criteria_tool'] 
+__all__ = ['SearchCriteria', 'clean_subspeciality', 'generate_sound_name', 'clean_and_generate_sound_name', 'build_doctor_sound_name_clause', 'unified_doctor_search', 'unified_doctor_search_tool', 'extract_search_criteria_tool'] 
