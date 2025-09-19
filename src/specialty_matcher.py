@@ -163,11 +163,23 @@ def detect_symptoms_and_specialties(user_message: str) -> Dict[str, Any]:
         common_greetings = [ "hello", "hi", "hey", "salam", "marhaba", "ahlan"]
         message_lower = user_message.lower().strip()
         
-        # If the message is just a greeting or contains only greeting words, return immediately
-        if message_lower in common_greetings or (
-            any(greeting in message_lower for greeting in common_greetings) and 
-            len(message_lower.split()) <= 3
-        ):
+        # More specific greeting detection - only skip if message is EXACTLY a greeting or starts with greeting
+        is_greeting = False
+        
+        # Check if message is exactly a greeting word
+        if message_lower in common_greetings:
+            is_greeting = True
+        # Check if message starts with a greeting word followed by punctuation or end
+        elif any(message_lower.startswith(greeting) and (
+            len(message_lower) == len(greeting) or 
+            message_lower[len(greeting):].strip() in ['!', '?', '.', ',', '']
+        ) for greeting in common_greetings):
+            is_greeting = True
+        # Check for very short messages that are likely greetings (1-2 words max)
+        elif len(message_lower.split()) <= 2 and any(greeting in message_lower for greeting in common_greetings):
+            is_greeting = True
+        
+        if is_greeting:
             logger.info(f"SYMPTOM ANALYZER: Detected greeting message, skipping analysis: '{message_lower}'")
             return {
                 "status": "no_symptoms",
@@ -219,6 +231,8 @@ def detect_symptoms_and_specialties(user_message: str) -> Dict[str, Any]:
         - Very short messages with just greetings should be classified as NOT describing symptoms
         - Information requests about medical procedures SHOULD trigger specialty matching
         - Questions about conditions or treatments SHOULD trigger specialty matching
+        - OFFERS for procedures/treatments (e.g., "offers for braces", "teeth whitening offers") SHOULD trigger specialty matching
+        - When user mentions "offers for [procedure]", treat it as if they said "[procedure]" for specialty detection
         
         SPECIALTY DATABASE:
         Use ONLY the following specialty data loaded from our medical database:
@@ -235,11 +249,18 @@ def detect_symptoms_and_specialties(user_message: str) -> Dict[str, Any]:
         - Use EXACT names of specialties and subspecialties as they appear in the database
         - Do NOT invent or suggest specialties not in the database
         - Assign realistic confidence levels (higher for clearer matches)
+        
+        EXAMPLES:
+        - "I have broken braces" → is_describing_symptoms: true, match to Dentistry/Orthodontics
+        - "offers for broken braces" → is_describing_symptoms: true, match to Dentistry/Orthodontics
+        - "teeth whitening offers" → is_describing_symptoms: true, match to Dentistry specialty
+        - "I need braces" → is_describing_symptoms: true, match to Dentistry/Orthodontics
+        - "offers related to braces" → is_describing_symptoms: true, match to Dentistry/Orthodontics
 
         
         RESPONSE FORMAT:
         Return a JSON object with these fields:
-        - is_describing_symptoms: boolean (true if message describes symptoms OR asks about procedures/conditions) (false if it is a greeting or a message that is not describing symptoms or speciality not available in our speciality list provided above)
+        - is_describing_symptoms: boolean (true if message describes symptoms OR asks about procedures/conditions OR mentions offers for procedures) (false if it is a greeting or a message that is not describing symptoms or speciality not available in our speciality list provided above)
         - speciality_not_available: boolean (true if no matching specialties found in database).
         
         If is_describing_symptoms is true, also include:
@@ -256,32 +277,55 @@ def detect_symptoms_and_specialties(user_message: str) -> Dict[str, Any]:
         logger.info("CALLING SPECIALTY MATCHER AGENT")
         logger.info("********************************")
         logger.info(f"SYMPTOM ANALYZER: Calling GPT for unified symptom detection and analysis")
+        logger.info(f"SYMPTOM ANALYZER: Input message: '{user_message}'")
+        logger.info(f"SYMPTOM ANALYZER: Available specialties count: {len(specialty_data)}")
+        
         gpt_start_time = time.time()
         
-        response = client.chat.completions.create(
-            model="gpt-4o-mini-2024-07-18",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_message}
-            ],
-            response_format={"type": "json_object"},
-            temperature=0.2,
-            max_tokens=800,
-            timeout=15
-        )
-        
-        gpt_time = time.time() - gpt_start_time
-        logger.info(f"SYMPTOM ANALYZER: GPT response received in {gpt_time:.2f}s")
-        
-        # Parse the GPT response
-        result_json = response.choices[0].message.content
-        logger.info(f"SYMPTOM ANALYZER: Processing GPT response")
-        result = json.loads(result_json)
+        try:
+            response = client.chat.completions.create(
+                model="gpt-4o-mini-2024-07-18",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_message}
+                ],
+                response_format={"type": "json_object"},
+                temperature=0.2,
+                max_tokens=800,
+                timeout=15
+            )
+            
+            gpt_time = time.time() - gpt_start_time
+            logger.info(f"SYMPTOM ANALYZER: GPT response received in {gpt_time:.2f}s")
+            
+            # Parse the GPT response
+            result_json = response.choices[0].message.content
+            logger.info(f"SYMPTOM ANALYZER: Raw GPT response: {result_json}")
+            logger.info(f"SYMPTOM ANALYZER: Processing GPT response")
+            result = json.loads(result_json)
+            
+        except Exception as gpt_error:
+            logger.error(f"SYMPTOM ANALYZER: GPT call failed: {str(gpt_error)}")
+            logger.error(f"SYMPTOM ANALYZER: Returning fallback response without GPT")
+            return {
+                "status": "error",
+                "is_describing_symptoms": False,
+                "message": "Error analyzing symptoms. Please try again.",
+                "error_details": str(gpt_error)
+            }
 
 
         print("-----------------RESULT OF SYMTOMP TOOL----------------")
         print(result)
         print("--------------------------------------------------------")
+        
+        # Log the parsed result details
+        logger.info(f"SYMPTOM ANALYZER: Parsed result - is_describing_symptoms: {result.get('is_describing_symptoms', 'N/A')}")
+        logger.info(f"SYMPTOM ANALYZER: Parsed result - speciality_not_available: {result.get('speciality_not_available', 'N/A')}")
+        if result.get('detected_symptoms'):
+            logger.info(f"SYMPTOM ANALYZER: Detected symptoms: {result.get('detected_symptoms')}")
+        if result.get('recommended_specialties'):
+            logger.info(f"SYMPTOM ANALYZER: Recommended specialties: {result.get('recommended_specialties')}")
         
         # Check if the message is describing symptoms
         is_describing_symptoms = result.get("is_describing_symptoms", False)
@@ -289,6 +333,8 @@ def detect_symptoms_and_specialties(user_message: str) -> Dict[str, Any]:
         
         # Check if specialty is not available in the database (important new flag)
         speciality_not_available = result.get("speciality_not_available", False)
+        logger.info(f"SYMPTOM ANALYZER: Specialty available in database: {not speciality_not_available}")
+        
         if speciality_not_available:
             logger.warning("SYMPTOM ANALYZER: User described symptoms that don't match any specialties in our database")
             
