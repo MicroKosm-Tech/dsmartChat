@@ -68,7 +68,7 @@ class DB:
             
             # Configure connection pooling for better performance
             self.engine = create_engine(
-                connection_string,
+                test_db_url,
                 pool_pre_ping=True,  # Validates connections before using them
                 pool_size=10,
                 max_overflow=20,

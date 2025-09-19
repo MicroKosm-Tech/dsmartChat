@@ -132,19 +132,19 @@ def clean_and_generate_sound_name(user_input: str) -> str:
     return generate_sound_name(cleaned_name)
 
 
-def build_query(criteria: SearchCriteria) -> Tuple[str, Dict[str, Any]]:
+def build_query_params(criteria: SearchCriteria) -> Dict[str, Any]:
     """
-    Build parameters for Sp_IntelligentSearch stored procedure
+    Build parameters for Sp_IntelligentSearch stored procedure without executing it
     
     Args:
         criteria: SearchCriteria object containing search parameters
         
     Returns:
-        Tuple of (stored procedure name, parameters dictionary)
+        Dictionary containing the parameters for the stored procedure
     """
     try:
         # Log the criteria we're using
-        logger.info(f"Building query with criteria: {criteria.dict(exclude_none=True)}")
+        logger.info(f"Building query parameters with criteria: {criteria.dict(exclude_none=True)}")
         
         # Debug log for specialty/subspecialty tracking
         if criteria.speciality:
@@ -158,17 +158,6 @@ def build_query(criteria: SearchCriteria) -> Tuple[str, Dict[str, Any]]:
         # Start building dynamic WHERE clause
         where_conditions = []
         
-        # # Doctor name search (high priority)
-        # if criteria.doctor_name:
-        #     doctor_name = criteria.doctor_name.replace("'", "''")
-        #     #where_conditions.append(f"AND (le.DocName_en LIKE N'%{doctor_name}%' OR le.DocName_ar LIKE N'%{doctor_name}%')")
-        #     where_conditions.append(f"""AND (SELECT STRING_AGG( N'(le.DocName_en LIKE N''%'+ value + N'%'' OR le.DocName_ar LIKE N''%'+ value + N'%'' )',N' AND ') FROM STRING_SPLIT(N'{doctor_name}', N' ')) = (N'(le.DocName_en LIKE N''%{doctor_name}%'' OR le.DocName_ar LIKE N''%{doctor_name}%'')')""")
-        # # Hospital/branch name search
-        # if criteria.branch_name:
-        #     branch_name = criteria.branch_name.replace("'", "''")
-        #     #where_conditions.append(f"AND (bg.BranchName_en LIKE N'%{branch_name}%' OR bg.BranchName_ar LIKE N'%{branch_name}%')")
-        #    where_conditions.append( f"""AND (SELECT STRING_AGG( N'(bg.BranchName_en LIKE N''%'+ value + N'%'' OR bg.BranchName_ar LIKE N''%'+ value + N'%'' )', N' AND ')FROM STRING_SPLIT(N'{branch_name}', N' ')) = (N'(bg.BranchName_en LIKE N''%{branch_name}%'' OR bg.BranchName_ar LIKE N''%{branch_name}%'')')""")
-
         # Doctor name search (high priority) - using sound name for phonetic matching
         if criteria.doctor_name:
             where_conditions.append(build_doctor_sound_name_clause(criteria.doctor_name))
@@ -180,7 +169,7 @@ def build_query(criteria: SearchCriteria) -> Tuple[str, Dict[str, Any]]:
         # Hospital name (if different from branch name)
         if criteria.hospital_name and criteria.hospital_name != criteria.branch_name:
             hospital_name = criteria.hospital_name.replace("'", "''")
-           # where_conditions.append(f"AND (bg.BranchName_en LIKE N'%{hospital_name}%' OR bg.BranchName_ar LIKE N'%{hospital_name}%')")
+            # where_conditions.append(f"AND (bg.BranchName_en LIKE N'%{hospital_name}%' OR bg.BranchName_ar LIKE N'%{hospital_name}%')")
             where_conditions.append(f"""AND (SELECT STRING_AGG(N'(bg.BranchName_en LIKE N''%'+ value + N'%'' OR bg.BranchName_ar LIKE N''%'+ value + N'%'' )',N' AND ') FROM STRING_SPLIT(N'{hospital_name}', N' ')) = (N'(bg.BranchName_en LIKE N''%{hospital_name}%'' OR bg.BranchName_ar LIKE N''%{hospital_name}%'')')""")
         
         # Specialty and subspecialty search
@@ -248,14 +237,43 @@ def build_query(criteria: SearchCriteria) -> Tuple[str, Dict[str, Any]]:
             
         logger.info(f"Built WHERE clause: {where_clause}")
         
-        # Create parameters dictionary with latitude, longitude, and WHERE clause
+        # Generate sound name for doctor search if doctor name is provided
+        name_sound = ""
+        if criteria.doctor_name:
+            name_sound = clean_and_generate_sound_name(criteria.doctor_name)
+            logger.info(f"🔊 Generated sound name: '{criteria.doctor_name}' -> '{name_sound}'")
+        
+        # Create parameters dictionary with latitude, longitude, name sound, and WHERE clause
         params = {
             "@Latitude": criteria.latitude if criteria.latitude is not None else 0.0,
             "@Longitude": criteria.longitude if criteria.longitude is not None else 0.0,
-            "@DynamicWhereClause": where_clause
+            "@NameSound": name_sound,
+            "@DynamicWhereClause": where_clause,
+            "@BoostedOnly": 0
         }
         
         logger.info(f"Using coordinates: Lat={params['@Latitude']}, Long={params['@Longitude']}")
+        logger.info(f"Generated parameters: {params}")
+        
+        return params
+        
+    except Exception as e:
+        logger.error(f"Error building query parameters: {str(e)}")
+        raise
+
+def build_query(criteria: SearchCriteria) -> Dict[str, Any]:
+    """
+    Build parameters for Sp_IntelligentSearch stored procedure and execute it
+    
+    Args:
+        criteria: SearchCriteria object containing search parameters
+        
+    Returns:
+        Dictionary containing the search results from the stored procedure
+    """
+    try:
+        # Build parameters using the helper function
+        params = build_query_params(criteria)
         
         # Execute the stored procedure and log the results
         sp_name = "[dbo].[Sp_IntelligentSearch]"
@@ -265,7 +283,6 @@ def build_query(criteria: SearchCriteria) -> Tuple[str, Dict[str, Any]]:
         result = db.execute_stored_procedure(sp_name, params)
         logger.info(f"🔍 DOCTOR SEARCH: Database returned result: {json.dumps(result, indent=2)}")
         
-        # Return stored procedure name and parameters
         return result
         
     except Exception as e:
@@ -293,28 +310,25 @@ def build_multi_word_like_clause(field_prefix: str, phrase: str) -> str:
 
 def build_doctor_sound_name_clause(doctor_name: str) -> str:
     """
-    Build a WHERE clause for doctor name search using the Name_Sound field.
-    This function generates the sound name and creates a LIKE clause for phonetic matching.
+    Build a WHERE clause for doctor name search.
+    Since we're now using @NameSound parameter in the stored procedure,
+    this function returns an empty string as the sound matching is handled
+    by the stored procedure itself.
 
     :param doctor_name: The doctor name to search for
-    :return: A string like: AND (le.Name_Sound LIKE N'SOUND_NAME')
+    :return: Empty string since sound matching is handled by @NameSound parameter
     """
     if not doctor_name or not doctor_name.strip():
         return ""
     
-    # Generate sound name for the doctor name
+    # Generate sound name for logging purposes
     sound_name = clean_and_generate_sound_name(doctor_name)
     
-    if not sound_name:
-        logger.warning(f"Could not generate sound name for doctor: '{doctor_name}'")
-        return ""
+    logger.info(f"🔊 DOCTOR SOUND SEARCH: Original='{doctor_name}' -> Sound='{sound_name}' (handled by @NameSound parameter)")
     
-    # Escape single quotes in sound name for T-SQL
-    safe_sound_name = sound_name.replace("'", "''").strip()
-    
-    logger.info(f"🔊 DOCTOR SOUND SEARCH: Original='{doctor_name}' -> Sound='{sound_name}'")
-    
-    return f"AND (le.DocName_en LIKE N'%{doctor_name}%' OR le.Name_Sound LIKE N'%{safe_sound_name}%' )"
+    # Return empty string since sound matching is now handled by the stored procedure
+    # via the @NameSound parameter
+    return ""
 
 def normalize_specialty(specialty_name: str) -> dict:
     """
