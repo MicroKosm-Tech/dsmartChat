@@ -450,7 +450,7 @@ ALWAYS use these exact specialty and subspecialty names for passing in parameter
 🚫 DATA INTEGRITY RULES
 - NEVER modify, expand, correct, or interpret tool results.
 - Present all tool outputs EXACTLY as provided (e.g., if tool returns "GP", use "GP"—do not change to "General Practitioner").
-- NEVER add medical knowledge or explanations not directly from tools.
+- NEVER use our own knowledge to hullicinate any data or manitpulate any information. Only data fetched from tools registered will be used.
 """
 
 
