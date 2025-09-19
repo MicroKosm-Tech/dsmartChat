@@ -292,13 +292,15 @@ You are an intelligent, warm, and multilingual medical assistant named "Dsmart A
 
 🛠️ TOOL EXECUTION PRIORITY
 
-1. Direct doctor/clinic/offer mention → immediately call [search_doctors_dynamic].
+1. Direct doctor/clinic mention → immediately call [search_doctors_dynamic].
 2. Symptom mention → call [analyze_symptoms], then immediately call [search_doctors_dynamic] with the result.
 3. Doctor confirmation (yes / okay / نعم / أجل) → immediately call [search_doctors_dynamic] using last known specialty/subspecialty.
 4. General info request (e.g., "Tell me about braces") → 
    - First call [analyze_symptoms] to detect specialty. 
    - Provide health information.
    - Then IMMEDIATELY call [search_doctors_dynamic].
+5. Offers mention with procedures/operations/treatments → call [analyze_symptoms] FIRST to detect specialty, then call [search_doctors_dynamic] with the result.
+6. Direct offers search (e.g., "show me all offers") → immediately call [search_doctors_dynamic] with offers-only parameters.
 
 **When to Call Each Tool**:
 
@@ -309,7 +311,8 @@ You are an intelligent, warm, and multilingual medical assistant named "Dsmart A
 - **`analyze_symptoms`**:
   - Call when user describes new symptoms or health concerns.
   - Call when user asks for information about a health issue.
-  - If symptoms are unclear, ask one clarifying question in the same language.
+  - Call when user mentions offers for specific procedures/treatments (e.g., "teeth whitening offers", "laser treatment offers").
+  - If symptoms/procedures are unclear, ask one clarifying question in the same language.
   - Never call if specialty and subspecialty are already detected or if user confirms a doctor search.
   - After receiving specialty/subspecialty, execute the `search_doctors_dynamic` tool.
 
@@ -323,6 +326,8 @@ You are an intelligent, warm, and multilingual medical assistant named "Dsmart A
   - If no results found, execute again with only location and respond: "I couldn't find your exact request, but here are other doctors near you."
   - For "doctors near me" or "offers near me", execute with location only.
   - For booking/appointment mentions, execute and say: "Use the 'Book Appointment' button on the doctor card or visit dsmart.ai for booking."
+  - For offers mentions, execute the search_doctors_dynamic with the offers parameters got from the analyze_symptoms tool.
+  - Whenever users say I dont see any offers or I dont see any doctors or similar terms, you need to execute the search_doctors_dynamic tool with the previous parameters in the context.
 
 🔄 CONVERSATION FLOW HANDLING
 
@@ -334,7 +339,9 @@ You are an intelligent, warm, and multilingual medical assistant named "Dsmart A
   - User: "Give me information about braces" → [analyze_symptoms] → Provide info → [search_doctors_dynamic]
 - **Scenario 4: New Health Issue**
   - User: "now I have toothache" → [analyze_symptoms] → [search_doctors_dynamic]
-- **Scenario 5: Patient Info**
+- **Scenario 5: Procedure Offers**
+  - User: "I am looking for teeth whitening offers" → [analyze_symptoms] → After result: [search_doctors_dynamic]
+- **Scenario 6: Patient Info**
   - User: "I am Hammad and 23 years old" → [store_patient_details: Name="Hammad", Age=23, Gender="Male"]
 
 ❌ RESTRICTED ACTIONS
@@ -748,9 +755,9 @@ def format_tools_for_openai():
             "required": [],
         },
         "analyze_symptoms": {
-            "description": "Analyze patient symptoms to match with appropriate medical specialties. CRITICAL: Call this tool when (1) user describes NEW symptoms that haven't been analyzed yet, OR (2) user describes DIFFERENT symptoms from what was previously analyzed. If the user describes the EXACT SAME symptoms that were already analyzed, DO NOT call this tool again. This tool will automatically clear previous specialty data and analyze the new symptoms to provide updated medical recommendations.",
+            "description": "Analyze patient symptoms, procedures, treatments, or health concerns to match with appropriate medical specialties. CRITICAL: Call this tool when (1) user describes NEW symptoms/procedures that haven't been analyzed yet, OR (2) user describes DIFFERENT symptoms/procedures from what was previously analyzed, OR (3) user mentions offers for specific procedures/treatments (e.g., 'teeth whitening offers', 'laser treatment offers'). If the user describes the EXACT SAME symptoms/procedures that were already analyzed, DO NOT call this tool again. This tool will automatically clear previous specialty data and analyze the new symptoms/procedures to provide updated medical recommendations.",
             "params": {
-                "symptom_description": "Description of symptoms or health concerns"
+                "symptom_description": "Description of symptoms, health concerns, procedures, treatments, or offers"
             },
             "required": ["symptom_description"],
         },
@@ -937,12 +944,28 @@ class SimpleMedicalAgent:
             logger.info(f"SYNC: OpenAI message counts: {openai_counts}")
             logger.info(f"SYNC: History message counts: {history_counts}")
 
-            # Check for mismatch
-            if len(messages) != len(history.messages) + 1:  # +1 for system message
+            # Check for mismatch - be more lenient with the count check
+            # Only rebuild if there's a significant structural issue
+            should_rebuild = False
+            
+            # Check if we have orphaned tool messages (tool messages without preceding tool_calls)
+            has_orphaned_tools = False
+            for i, msg in enumerate(messages):
+                if msg.get("role") == "tool":
+                    # Check if the previous message has tool_calls
+                    if i > 0 and messages[i-1].get("role") == "assistant" and messages[i-1].get("tool_calls"):
+                        continue  # This tool message is properly paired
+                    else:
+                        has_orphaned_tools = True
+                        break
+            
+            if has_orphaned_tools or len(messages) != len(history.messages) + 1:
+                should_rebuild = True
                 logger.warning(
-                    f"SYNC: Message count mismatch - OpenAI: {len(messages)}, History: {len(history.messages)}"
+                    f"SYNC: Message structure issue detected - OpenAI: {len(messages)}, History: {len(history.messages)}, Orphaned tools: {has_orphaned_tools}"
                 )
 
+            if should_rebuild:
                 # Log the actual messages for comparison
                 logger.info("SYNC: OpenAI Messages:")
                 for i, msg in enumerate(messages):
@@ -965,66 +988,116 @@ class SimpleMedicalAgent:
                         f"  {i}: {msg['type']} - {msg.get('content', '')[:50]}..."
                     )
 
-                # Rebuild messages from history
-            new_messages = [
-                {"role": "system", "content": UNIFIED_MEDICAL_ASSISTANT_PROMPT}
-            ]
+                # Rebuild messages from history with proper tool call/tool response pairing
+                new_messages = [
+                    {"role": "system", "content": UNIFIED_MEDICAL_ASSISTANT_PROMPT}
+                ]
 
-            for msg in history.messages:
-                if msg["type"] == "human":
-                    new_messages.append({"role": "user", "content": msg["content"]})
-                elif msg["type"] == "ai":
-                    if msg.get("tool_calls"):
-                        # Handle tool calls in the correct format
-                        tool_calls = msg["tool_calls"]
-                        formatted_tool_calls = []
-                        for tool_call in tool_calls:
-                            if isinstance(tool_call, dict):
-                                formatted_tool_calls.append(
-                                    {
-                                        "id": tool_call.get("id", str(uuid.uuid4())),
-                                        "type": "function",
-                                        "function": {
-                                            "name": tool_call["function"]["name"],
-                                            "arguments": tool_call["function"][
-                                                "arguments"
-                                            ],
-                                        },
-                                    }
-                                )
-                        new_messages.append(
-                            {
-                                "role": "assistant",
-                                "content": None,
-                                "tool_calls": formatted_tool_calls,
-                            }
-                        )
-                    else:
-                        new_messages.append(
-                            {"role": "assistant", "content": msg["content"]}
-                        )
-                elif msg["type"] == "tool":
-                    new_messages.append(
-                        {
-                            "role": "tool",
-                            "content": msg.get("content"),
-                            "tool_call_id": msg.get("tool_call_id"),
-                            "name": msg.get("name"),
-                        }
-                    )
+                i = 0
+                while i < len(history.messages):
+                    msg = history.messages[i]
+                    
+                    if msg["type"] == "human":
+                        new_messages.append({"role": "user", "content": msg["content"]})
+                    elif msg["type"] == "ai":
+                        if msg.get("tool_calls"):
+                            # Handle tool calls in the correct format
+                            tool_calls = msg["tool_calls"]
+                            formatted_tool_calls = []
+                            tool_call_ids = []  # Track tool call IDs
+                            
+                            for tool_call in tool_calls:
+                                if isinstance(tool_call, dict):
+                                    tool_call_id = tool_call.get("id", str(uuid.uuid4()))
+                                    tool_call_ids.append(tool_call_id)
+                                    formatted_tool_calls.append(
+                                        {
+                                            "id": tool_call_id,
+                                            "type": "function",
+                                            "function": {
+                                                "name": tool_call["function"]["name"],
+                                                "arguments": tool_call["function"][
+                                                    "arguments"
+                                                ],
+                                            },
+                                        }
+                                    )
+                            
+                            new_messages.append(
+                                {
+                                    "role": "assistant",
+                                    "content": None,
+                                    "tool_calls": formatted_tool_calls,
+                                }
+                            )
+                            
+                            # Look for corresponding tool responses with matching tool_call_id
+                            j = i + 1
+                            while j < len(history.messages) and history.messages[j]["type"] == "tool":
+                                tool_msg = history.messages[j]
+                                tool_call_id = tool_msg.get("tool_call_id")
+                                
+                                # Only add tool response if it has a valid tool_call_id that matches our tool calls
+                                if tool_call_id and tool_call_id in tool_call_ids:
+                                    new_messages.append(
+                                        {
+                                            "role": "tool",
+                                            "content": tool_msg.get("content"),
+                                            "tool_call_id": tool_call_id,
+                                            "name": tool_msg.get("name"),
+                                        }
+                                    )
+                                j += 1
+                            i = j - 1  # Skip the tool messages we just processed
+                        else:
+                            new_messages.append(
+                                {"role": "assistant", "content": msg["content"]}
+                            )
+                    elif msg["type"] == "tool":
+                        # Skip tool messages here - they should be handled with their corresponding assistant message
+                        pass
+                    
+                    i += 1
 
-            # Update the session messages
-            self.messages_by_session[session_id] = new_messages
-            logger.info(f"SYNC: Rebuilt messages - new count: {len(new_messages)}")
-            return self.messages_by_session[session_id]
+                # Update the session messages
+                self.messages_by_session[session_id] = new_messages
+                logger.info(f"SYNC: Rebuilt messages - new count: {len(new_messages)}")
+                return self.messages_by_session[session_id]
 
-            return messages
+            # Validate message structure before returning
+            validated_messages = self._validate_message_structure(messages)
+            return validated_messages
         except Exception as e:
             logger.error(
                 f"SYNC ERROR: Failed to sync session history: {str(e)}", exc_info=True
             )
             # Return default messages if sync fails
             return [{"role": "system", "content": UNIFIED_MEDICAL_ASSISTANT_PROMPT}]
+
+    def _validate_message_structure(self, messages):
+        """Validate and fix message structure to prevent OpenAI API errors"""
+        try:
+            validated_messages = []
+            
+            for i, msg in enumerate(messages):
+                if msg.get("role") == "tool":
+                    # Check if this tool message has a preceding assistant message with tool_calls
+                    if i > 0 and messages[i-1].get("role") == "assistant" and messages[i-1].get("tool_calls"):
+                        # This tool message is properly paired
+                        validated_messages.append(msg)
+                    else:
+                        # Skip orphaned tool messages
+                        logger.warning(f"SYNC: Skipping orphaned tool message at index {i}")
+                        continue
+                else:
+                    validated_messages.append(msg)
+            
+            logger.info(f"SYNC: Validated messages - original: {len(messages)}, validated: {len(validated_messages)}")
+            return validated_messages
+            
+        except Exception as e:
+            logger.error(f"SYNC: Error validating message structure: {str(e)}")
+            return messages
 
     def add_message_to_history(self, session_id: str, message: dict):
         """Helper method to add a message to both OpenAI messages and chat history"""
