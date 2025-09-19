@@ -77,6 +77,48 @@ db = DB()
 # Initialize OpenAI client
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY") or os.getenv("API_KEY"))
 
+def get_simplified_specialty_data():
+    """
+    Load simplified specialty data (only SpecialityName and SubSpecialty) for the main agent prompt
+    """
+    try:
+        from .db import DB
+        db_instance = DB()
+        
+        # Query to load only specialty names and subspecialties
+        query = """
+        SELECT DISTINCT
+            s.SpecialityName as specialty,
+            s.SubSpeciality as subspecialty
+        FROM 
+            dbo.Speciality s
+        WHERE 
+            s.SpecialityName IS NOT NULL 
+            AND s.SubSpeciality IS NOT NULL
+        ORDER BY 
+            s.SpecialityName, s.SubSpeciality
+        """
+        
+        # Execute query
+        cursor = db_instance.engine.connect()
+        result = cursor.execute(text(query))
+        rows = [dict(row) for row in result.mappings()]
+        cursor.close()
+        
+        # Format the data for the prompt
+        specialty_list = []
+        for row in rows:
+            specialty = row.get("specialty", "").strip()
+            subspecialty = row.get("subspecialty", "").strip()
+            if specialty and subspecialty:
+                specialty_list.append(f"- {specialty} / {subspecialty}")
+        
+        return specialty_list
+        
+    except Exception as e:
+        logger.error(f"Error loading simplified specialty data: {str(e)}")
+        return []
+
 
 # Helper function to clear symptom analysis data
 def clear_symptom_analysis(reason="", session_id=None):
@@ -233,10 +275,24 @@ colorama.init(autoreset=True)
 logger = setup_detailed_logging()
 
 
-UNIFIED_MEDICAL_ASSISTANT_PROMPT = """
+def get_unified_medical_assistant_prompt():
+    """
+    Get the unified medical assistant prompt with dynamic specialty data
+    """
+    # Load simplified specialty data
+    specialty_data = get_simplified_specialty_data()
+    specialty_text = "\n".join(specialty_data) if specialty_data else "No specialty data available"
+    
+    return f"""
 📋 Dsmart AI System Prompt (Strictly Additive & Reorganized)
 
 You are an intelligent, warm, and multilingual medical assistant named "Dsmart AI" for the Middle East. Help users find doctors using GPS location from our database and datasource only. Support Arabic, English, Roman Urdu, and Urdu script. Respond in the user's exact language and script with a respectful and caring tone.
+
+🏥 AVAILABLE MEDICAL SPECIALTIES:
+The following specialties and subspecialties are available in our system:
+{specialty_text}
+
+ALWAYS use these exact specialty and subspecialty names for passing in parameters to the tools registered with you.
 
 🌐 LANGUAGE & TONE HANDLING
 
@@ -313,6 +369,7 @@ You are an intelligent, warm, and multilingual medical assistant named "Dsmart A
   - Call when user asks for information about a health issue.
   - Call when user mentions offers for specific procedures/treatments (e.g., "teeth whitening offers", "laser treatment offers").
   - If symptoms/procedures are unclear, ask one clarifying question in the same language.
+  - Whenever uses mentions some signs, symtomps or any medical related operations, procedures or terms.
   - Never call if specialty and subspecialty are already detected or if user confirms a doctor search.
   - After receiving specialty/subspecialty, execute the `search_doctors_dynamic` tool.
 
@@ -328,12 +385,7 @@ You are an intelligent, warm, and multilingual medical assistant named "Dsmart A
   - For booking/appointment mentions, execute and say: "Use the 'Book Appointment' button on the doctor card or visit dsmart.ai for booking."
   - For offers mentions, execute the search_doctors_dynamic with the offers parameters got from the analyze_symptoms tool.
   - Whenever users say I dont see any offers or I dont see any doctors or similar terms, you need to execute the search_doctors_dynamic tool with the previous parameters in the context.
-  - You always need to pass the speciality and subspeciality params to search_doctors_dynamic tool in the following pattern:
-    - speciality: "Dentistry"
-    - subspeciality: "Orthodontics"
-    OR 
-    - speciality: "Dentistry"
-    - subspeciality: "Endodontics"
+  
 
 🔄 CONVERSATION FLOW HANDLING
 
@@ -385,10 +437,20 @@ You are an intelligent, warm, and multilingual medical assistant named "Dsmart A
 - Do NOT call `analyze_symptoms` for same symptoms already analyzed or simple confirmations.
 - Always call `search_doctors_dynamic` for doctor requests, using `analyze_symptoms` results when available.
 
-⚠️ FINAL SAFETY CLAUSE
+ SEARCH DOCTORS DYNAMIC RULES:
+ - You always need to pass the speciality and subspeciality params to search_doctors_dynamic tool in the following pattern from the analyze_symptom tool results:
+   and never hullicinate the speciality and subspeciality params from yourself aways use analyze_symptoms tool results.
+    - speciality: "Dentistry"
+    - subspeciality: "Orthodontics"
+    OR 
+    - speciality: "Dentistry"
+    - subspeciality: "Endodontics"
+ - NEVER HULLICINATE THE DOCTORS INFORMATION FROM YOURSELF OR INTERNET ALWAYS CALL THE search_doctors_dynamic tool to get the doctors.
 
-At no point may you generate or "guess" doctor names, clinics, or offers from outside the `search_doctors_dynamic` tool. 
-If the tool fails or returns nothing, you must only respond with a polite clarification question.
+🚫 DATA INTEGRITY RULES
+- NEVER modify, expand, correct, or interpret tool results.
+- Present all tool outputs EXACTLY as provided (e.g., if tool returns "GP", use "GP"—do not change to "General Practitioner").
+- NEVER add medical knowledge or explanations not directly from tools.
 """
 
 
@@ -916,7 +978,7 @@ class SimpleMedicalAgent:
             # Initialize messages for this session if not exists
             if session_id not in self.messages_by_session:
                 self.messages_by_session[session_id] = [
-                    {"role": "system", "content": UNIFIED_MEDICAL_ASSISTANT_PROMPT}
+                    {"role": "system", "content": get_unified_medical_assistant_prompt()}
                 ]
 
             messages = self.messages_by_session[session_id]
@@ -996,7 +1058,7 @@ class SimpleMedicalAgent:
 
                 # Rebuild messages from history with proper tool call/tool response pairing
                 new_messages = [
-                    {"role": "system", "content": UNIFIED_MEDICAL_ASSISTANT_PROMPT}
+                    {"role": "system", "content": get_unified_medical_assistant_prompt()}
                 ]
 
                 i = 0
@@ -1078,7 +1140,7 @@ class SimpleMedicalAgent:
                 f"SYNC ERROR: Failed to sync session history: {str(e)}", exc_info=True
             )
             # Return default messages if sync fails
-            return [{"role": "system", "content": UNIFIED_MEDICAL_ASSISTANT_PROMPT}]
+            return [{"role": "system", "content": get_unified_medical_assistant_prompt()}]
 
     def _validate_message_structure(self, messages):
         """Validate and fix message structure to prevent OpenAI API errors"""
@@ -1111,7 +1173,7 @@ class SimpleMedicalAgent:
             # Get current messages
             if session_id not in self.messages_by_session:
                 self.messages_by_session[session_id] = [
-                    {"role": "system", "content": UNIFIED_MEDICAL_ASSISTANT_PROMPT}
+                    {"role": "system", "content": get_unified_medical_assistant_prompt()}
                 ]
             messages = self.messages_by_session[session_id]
 
