@@ -159,10 +159,48 @@ def clear_symptom_analysis(reason="", session_id=None):
 # Setup detailed logging for debugging
 def setup_detailed_logging():
     """
-    Configure detailed logging with colorful console output
-    for better visibility and debugging
+    Configure comprehensive logging that captures ALL terminal output including
+    uvicorn, API logs, and all other components
     """
-    # Configure root logger
+    import os
+    import sys
+    from pathlib import Path
+    
+    # Create logs directory if it doesn't exist
+    logs_dir = Path("logs")
+    logs_dir.mkdir(exist_ok=True)
+    
+    # Create file handler with date-based log files
+    today = datetime.datetime.now().strftime("%Y-%m-%d")
+    log_filename = logs_dir / f"medical_assistant_{today}.log"
+    
+    # Custom formatter for file output (captures everything)
+    class ComprehensiveFileFormatter(logging.Formatter):
+        """Custom formatter that captures all terminal output"""
+        
+        def format(self, record):
+            # Format timestamp with full date and time
+            timestamp = datetime.datetime.fromtimestamp(record.created).strftime(
+                "%Y-%m-%d %H:%M:%S.%f"
+            )[:-3]  # Remove last 3 digits of microseconds for cleaner output
+            
+            # Get module name (clean up for readability)
+            module_name = record.name
+            if module_name.startswith('src.'):
+                module_name = module_name[4:]
+            elif module_name == 'root':
+                module_name = 'main'
+            
+            # Create detailed log entry
+            log_entry = f"[{timestamp}] {record.levelname:8} [{module_name:15}] {record.getMessage()}"
+            
+            # Add exception info if present
+            if record.exc_info:
+                log_entry += f"\n{self.formatException(record.exc_info)}"
+            
+            return log_entry
+    
+    # Configure root logger to capture everything
     root_logger = logging.getLogger()
     root_logger.setLevel(logging.INFO)
 
@@ -175,7 +213,7 @@ def setup_detailed_logging():
     console_handler = logging.StreamHandler()
     console_handler.setLevel(logging.INFO)
 
-    # Custom formatter with colors
+    # Custom formatter with colors for console
     class ColorFormatter(logging.Formatter):
         """Custom formatter with colors for different log levels"""
 
@@ -229,17 +267,138 @@ def setup_detailed_logging():
     # Set formatter on console handler
     console_handler.setFormatter(ColorFormatter("%(message)s"))
 
-    # Add handler to logger
+    # Create file handler
+    file_handler = logging.FileHandler(log_filename, mode='a', encoding='utf-8')
+    file_handler.setLevel(logging.INFO)
+    file_handler.setFormatter(ComprehensiveFileFormatter())
+    
+    # Add both handlers to root logger
     root_logger.addHandler(console_handler)
+    root_logger.addHandler(file_handler)
+    
+    # Configure specific loggers to ensure they use the root logger
+    # This captures uvicorn, fastapi, and other component logs
+    
+    # Configure uvicorn logger
+    uvicorn_logger = logging.getLogger("uvicorn")
+    uvicorn_logger.setLevel(logging.INFO)
+    uvicorn_logger.propagate = True  # This ensures it uses root logger handlers
+    
+    # Configure uvicorn access logger
+    uvicorn_access_logger = logging.getLogger("uvicorn.access")
+    uvicorn_access_logger.setLevel(logging.INFO)
+    uvicorn_access_logger.propagate = True
+    
+    # Configure uvicorn error logger
+    uvicorn_error_logger = logging.getLogger("uvicorn.error")
+    uvicorn_error_logger.setLevel(logging.INFO)
+    uvicorn_error_logger.propagate = True
+    
+    # Configure fastapi logger
+    fastapi_logger = logging.getLogger("fastapi")
+    fastapi_logger.setLevel(logging.INFO)
+    fastapi_logger.propagate = True
+    
+    # Configure httpx logger (for HTTP requests)
+    httpx_logger = logging.getLogger("httpx")
+    httpx_logger.setLevel(logging.INFO)
+    httpx_logger.propagate = True
+    
+    # Configure openai logger
+    openai_logger = logging.getLogger("openai")
+    openai_logger.setLevel(logging.INFO)
+    openai_logger.propagate = True
+    
+    # Configure all other loggers to propagate to root
+    # This ensures we capture everything
+    for logger_name in ["api", "db", "agent", "agent_tools", "specialty_matcher", "utils"]:
+        logger_obj = logging.getLogger(logger_name)
+        logger_obj.setLevel(logging.INFO)
+        logger_obj.propagate = True
+
+    # Create a custom stdout/stderr capture to log everything
+    class TerminalCapture:
+        """Capture stdout/stderr and log to file"""
+        
+        def __init__(self, original_stream, log_file):
+            self.original_stream = original_stream
+            self.log_file = log_file
+            
+        def write(self, message):
+            # Write to original stream (console)
+            self.original_stream.write(message)
+            self.original_stream.flush()
+            
+            # Also write to log file if it's not empty
+            if message.strip():
+                try:
+                    with open(self.log_file, 'a', encoding='utf-8') as f:
+                        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+                        
+                        # Remove ANSI escape codes for clean file output
+                        import re
+                        clean_message = re.sub(r'\x1b\[[0-9;]*m', '', message)
+                        
+                        f.write(f"[{timestamp}] TERMINAL: {clean_message}")
+                except Exception:
+                    pass  # Don't break if logging fails
+                    
+        def flush(self):
+            self.original_stream.flush()
+            
+        def __getattr__(self, name):
+            return getattr(self.original_stream, name)
+    
+    # Capture stdout and stderr
+    original_stdout = sys.stdout
+    original_stderr = sys.stderr
+    
+    sys.stdout = TerminalCapture(original_stdout, log_filename)
+    sys.stderr = TerminalCapture(original_stderr, log_filename)
 
     # Print start of application with colorful banner
     print(f"\n{Fore.CYAN}{'='*80}{Style.RESET_ALL}")
     print(f"{Fore.CYAN}{'='*30} MEDICAL ASSISTANT CHAT {'='*30}{Style.RESET_ALL}")
     print(f"{Fore.CYAN}{'='*80}{Style.RESET_ALL}\n")
+    
+    # Log the file location
+    root_logger.info(f"📁 Comprehensive logs are being saved to: {log_filename.absolute()}")
 
-    root_logger.info("🚀 Starting Medical Assistant Chat with detailed console logging")
+    root_logger.info("🚀 Starting Medical Assistant Chat with comprehensive console and file logging")
 
     return root_logger
+
+
+def setup_log_rotation():
+    """
+    Setup log rotation to prevent log files from growing too large
+    """
+    import os
+    import glob
+    from pathlib import Path
+    from datetime import datetime, timedelta
+    
+    logs_dir = Path("logs")
+    if not logs_dir.exists():
+        return
+    
+    # Keep logs for 30 days
+    cutoff_date = datetime.now() - timedelta(days=30)
+    
+    # Find all log files
+    log_files = glob.glob(str(logs_dir / "medical_assistant_*.log"))
+    
+    for log_file in log_files:
+        try:
+            # Get file modification time
+            file_time = datetime.fromtimestamp(os.path.getmtime(log_file))
+            
+            # Delete old log files
+            if file_time < cutoff_date:
+                os.remove(log_file)
+                logger.info(f"🗑️ Deleted old log file: {log_file}")
+        except Exception as e:
+            logger.warning(f"⚠️ Could not delete log file {log_file}: {e}")
 
 
 # Get database instance for doctor searches
@@ -274,6 +433,9 @@ colorama.init(autoreset=True)
 # Initialize logger with detailed settings
 logger = setup_detailed_logging()
 
+# Setup log rotation to clean up old files
+setup_log_rotation()
+
 
 def get_unified_medical_assistant_prompt():
     """
@@ -288,15 +450,21 @@ def get_unified_medical_assistant_prompt():
 
 You are an intelligent, warm, and multilingual medical assistant named "Dsmart AI" for the Middle East. Help users find doctors using GPS location from our database and datasource only. Support Arabic, English, Roman Urdu, and Urdu script. Respond in the user's exact language and script with a respectful and caring tone.
 
-🏥 AVAILABLE MEDICAL SPECIALTIES:
-The following specialties and subspecialties are available in our system:
-{specialty_text}
 
-ALWAYS use these exact specialty and subspecialty names for passing in parameters to the tools registered with you.
 
-🌐 LANGUAGE & TONE HANDLING
+🌐 LANGUAGE & TONE HANDLING (CRITICAL)
 
-- Respond in the user's dominant language. If multiple languages are mixed, default to Arabic unless explicitly requested otherwise.
+- **MANDATORY**: Always respond in the EXACT same language the user is using.
+- **Arabic Detection**: If user writes in Arabic script (العربية), respond in Arabic immediately.
+- **English Detection**: If user writes in English, respond in English.
+- **Urdu Detection**: If user writes in Urdu script (اردو) or Roman Urdu, respond in Urdu.
+- **Default Rule**: If language is unclear or mixed, default to Arabic.
+- **Never switch languages** unless the user switches first.
+
+**Language Examples**:
+- User: "مرحبا" → Agent: "مرحبا! كيف يمكنني مساعدتك اليوم؟"
+- User: "Hello" → Agent: "Hello! How can I help you today?"
+
 - Maintain tone:
   - Arabic: Respectful and formal
   - English: Warm and friendly
@@ -327,19 +495,24 @@ ALWAYS use these exact specialty and subspecialty names for passing in parameter
 
 👋 INITIAL CONVERSATION FLOW (CRITICAL)
 
+- **CRITICAL**: Before asking for name/age, ALWAYS check the conversation history to see if this information was already provided.
+- **LANGUAGE PRIORITY**: Detect user's language immediately and respond in the same language.
 - **First Priority**: Start EVERY conversation with a friendly greeting and ask for the user's name, followed by their age. Call `store_patient_details` immediately after receiving name AND age.
+- **NEVER ask for information that was already provided in the current conversation**.
 - Update with the latest information if user provides contradictory or new details (e.g., new age, name, symptoms).
 - If input is unclear (e.g., "I feel bad"), ask clarifying questions in the same language.
 - If user requests information about a health concern, provide detailed information and execute [analyze_symptoms] and then [search_doctors_dynamic: specialty=..., subspecialty=...] with relevant parameters from [analyze_symptoms].
 - **Exception**: If user starts with a direct doctor or offers request (e.g., "find me dentists," "show me offers from Loran clinic"), skip name/age collection and execute `search_doctors_dynamic` with relevant parameters. Call `store_patient_details` later if name/age provided.
 
 **Example Flow**:
-- User: "Hi" or "مرحبا" or "سلام"
-  - Response: "Hello! I'm here to help with your healthcare needs. May I know your name?"
-- User: "Ali" or "علي"
-  - Response: "Nice to meet you, Ali! Could you please tell me your age?"
-- User: "25"
-  - Response: [store_patient_details: Name="Ali", Age=25, Gender="Male"] "Thank you, Ali! How can I help you today?"
+- User: "Hi" → Response: "Hello! I'm here to help with your healthcare needs. May I know your name?"
+- User: "مرحبا", "هلا والله" → Response: "مرحبا! أنا هنا لمساعدتك في احتياجاتك الصحية. هل يمكنني معرفة اسمك؟"
+- User: "سلام" → Response: "سلام! میں آپ کی صحت کی ضروریات میں مدد کے لیے یہاں ہوں۔ کیا میں آپ کا نام جان سکتا ہوں؟"
+- User: "Ali" → Response: "Nice to meet you, Ali! Could you please tell me your age?"
+- User: "علي" → Response: "تشرفنا، علي! هل يمكنك إخباري بعمرك؟"
+- User: "25" → Response: [store_patient_details: Name="Ali", Age=25, Gender="Male"] "Thank you, Ali! How can I help you today?"
+- User: "حمّاد" → Response: "تشرفنا، حمّاد! هل يمكنك إخباري بعمرك؟"
+- User: "٢٣" → Response: [store_patient_details: Name="حمّاد", Age=23, Gender="Male"] "شكراً لك، حمّاد! كيف يمكنني مساعدتك اليوم؟"
   
 🚫 STRICT RULE: Never mention or list any doctor without executing `search_doctors_dynamic`. 
 - You must wait for tool results before referencing doctors.
@@ -362,7 +535,11 @@ ALWAYS use these exact specialty and subspecialty names for passing in parameter
 
 - **`store_patient_details`**:
   - Call when user provides name AND age (e.g., "I am Hammad and 23 years old").
+  - Call when user provides name and age in seperate messages. (eg: "I am Hammad" -> "I am 23 years old" or "Hammad" -> "23")
+  - **CRITICAL**: Check conversation history first - if name/age were provided in previous messages, extract and use that information.
+  - **CRITICAL**: If provided already don't ask again just call the tool with the already provided information.
   - Never call if patient info is already complete.
+  - Never ask for information that was already provided in the conversation.
 
 - **`analyze_symptoms`**:
   - Call when user describes new symptoms or health concerns.
@@ -412,24 +589,42 @@ ALWAYS use these exact specialty and subspecialty names for passing in parameter
 - Never use delaying language, announce actions, or imply waiting.
 - Never ask for location (GPS is always available).
 - Never provide information about system technologies or programming languages.
+- **Never respond in English when user writes in Arabic** - always match the user's language.
 
 ✅ MANDATORY ACTIONS
 
-- Start conversations by asking for name and age.
+- **LANGUAGE DETECTION**: Always detect and respond in the user's language immediately.
+- **ARABIC NUMERAL CONVERSION**: Convert Arabic numerals to English for age detection:
+- Start conversations by asking for name and age in the user's language.
 - Call `store_patient_details` when name AND age are provided.
 - Update patient details with the most recent values.
 - Execute `analyze_symptoms` for new health concerns.
 - Execute `search_doctors_dynamic` for all doctor requests or confirmations.
-- Present tool results naturally in structured format.
+- Present tool results naturally in structured format in the user's language.
+
+
+🏥 AVAILABLE MEDICAL SPECIALTIES:
+The following specialties and subspecialties are available in our system:
+{specialty_text}
+
+ALWAYS use these exact specialty and subspecialty names for passing in parameters to the tools registered with you.
 
 👤 PATIENT INFORMATION EXTRACTION
 
-- **Name Detection**: "My name is [Name]", "I'm [Name]", "[Name] here"
-- **Age Detection**: "I'm [Age] years old", "Age [Age]"
+- **CRITICAL**: Always check conversation history before asking for information again and ask only once for name and age.
+- As Soon As you get the name and age of the user execute store_patient_details tool with the name and age
+- **Name Detection**: "My name is [Name]", "I'm [Name]", "[Name] here", or just "[Name]" as a response to "What's your name?"
+- **Age Detection**: 
+  - "I'm [Age] years old", "Age [Age]", or just "[Age]" as a response to "What's your age?"
+  - **Arabic Numerals**: "٢٣" (23), "٢٥" (25), "٣٠" (30), etc.
+  - **English Numerals**: "23", "25", "30", etc.
+  - **Mixed**: "I'm ٢٣ years old" or "عمرى ٢٣"
 - **Gender Detection**: "Male", "Female", pronouns
-- Examples:
+- **Examples**:
   - "Hi, I'm Ali and I'm 25 years old" → [store_patient_details: Name="Ali", Age=25, Gender="Male"]
   - "My name is Sara, I'm 30" → [store_patient_details: Name="Sara", Age=30, Gender="Female"]
+  - User: "What's your name?" → Agent: "May I know your name?" → User: "Hammad" → Agent: "Nice to meet you, Hammad! Could you please tell me your age?" → User: "23" → [store_patient_details: Name="Hammad", Age=23]
+  - User: "What's your age?" → Agent: "Could you tell me your age?" → User: "٢٣" → [store_patient_details: Age=23]
 
 🩺 SPECIALTY DETECTION RULES
 
@@ -812,7 +1007,7 @@ def format_tools_for_openai():
             "required": ["user_message", "latitude", "longitude"],
         },
         "store_patient_details": {
-            "description": "Store patient information in the session. CRITICAL: Call this tool IMMEDIATELY whenever any patient details are provided (name, age, gender, location, symptoms). This should typically be the FIRST tool in the flow. You MUST provide at least one of: Name, Age, Gender, Location, or Issue. DO NOT include session_id - it will be handled automatically. VALID FIELDS ONLY: Name, Age, Gender, Location, Issue. DO NOT send any other fields. EXAMPLES: 'i am hammad and 23 years old' → Call with Name='hammad', Age=23, Gender='Male'",
+            "description": "Store patient information in the session. CRITICAL: Call this tool IMMEDIATELY when you have BOTH name AND age from the conversation. Check conversation history first - if user already provided name/age in previous messages, extract and use that information. Never ask for information that was already provided. You MUST provide at least one of: Name, Age, Gender, Location, or Issue. DO NOT include session_id - it will be handled automatically. VALID FIELDS ONLY: Name, Age, Gender, Location, Issue. AGE DETECTION: Recognize Arabic numerals (٢٣=23, ٢٥=25, ٣٠=30) and English numerals (23, 25, 30). EXAMPLES: 'i am hammad and 23 years old' → Call with Name='hammad', Age=23, Gender='Male'; User says '٢٣' → Call with Age=23",
             "params": {
                 "Name": "Name of the patient (string, optional but recommended)",
                 "Age": "Age of the patient (integer, optional but recommended)",
@@ -1287,16 +1482,16 @@ class SimpleMedicalAgent:
                 # Get history for processing
                 history = get_session_history(session_id)
 
-                # Get or initialize message history for this session
+                # Add user message to history FIRST
+                self.add_message_to_history(
+                    session_id, {"role": "user", "content": user_message}
+                )
+
+                # Get or initialize message history for this session (now includes current message)
                 messages = self.sync_session_history(session_id)
 
                 # Get patient data
                 patient_data = history.get_patient_data()
-
-                # Add user message to history
-                self.add_message_to_history(
-                    session_id, {"role": "user", "content": user_message}
-                )
 
                 # Let AI extract patient information if not already stored
                 if not patient_data or not patient_data.get("Name"):
@@ -1316,6 +1511,26 @@ class SimpleMedicalAgent:
                 logger.info("CALLING SIMPLE MEDICAL AGENT")
                 logger.info("********************************")
                 logger.info(f"🔍 DEBUG: lat={lat}, long={long} before AI call")
+                
+                # Print conversation history being sent to main agent
+                print(f"\n📋 CONVERSATION HISTORY SENT TO MAIN AGENT (Session: {session_id}):")
+                print(f"Total messages: {len(messages)}")
+                for i, msg in enumerate(messages):
+                    role = msg.get("role", "unknown")
+                    content = msg.get("content", "")
+                    if role == "system":
+                        print(f"  {i+1}. [{role.upper()}] {content[:100]}..." if len(content) > 100 else f"  {i+1}. [{role.upper()}] {content}")
+                    elif role == "user":
+                        print(f"  {i+1}. [{role.upper()}] {content}")
+                    elif role == "assistant":
+                        if msg.get("tool_calls"):
+                            print(f"  {i+1}. [{role.upper()}] Tool calls: {len(msg['tool_calls'])} calls")
+                        else:
+                            print(f"  {i+1}. [{role.upper()}] {content}")
+                    elif role == "tool":
+                        tool_call_id = msg.get("tool_call_id", "unknown")
+                        print(f"  {i+1}. [{role.upper()}] Tool result (ID: {tool_call_id})")
+                print("📋 END CONVERSATION HISTORY\n")
                 
                 response = client.chat.completions.create(
                     model="gpt-4.1-2025-04-14",
@@ -2349,6 +2564,27 @@ Generate a natural, helpful response that follows this strategy and incorporates
                     logger.info(f"🔄 Final patient_data after None check: {patient_data}")
 
                     # AI will handle context generation dynamically
+
+                    # Print conversation history being sent to final response agent
+                    final_messages = messages + [final_context_message]
+                    print(f"\n📋 CONVERSATION HISTORY SENT TO FINAL RESPONSE AGENT (Session: {session_id}):")
+                    print(f"Total messages: {len(final_messages)}")
+                    for i, msg in enumerate(final_messages):
+                        role = msg.get("role", "unknown")
+                        content = msg.get("content", "")
+                        if role == "system":
+                            print(f"  {i+1}. [{role.upper()}] {content[:100]}..." if len(content) > 100 else f"  {i+1}. [{role.upper()}] {content}")
+                        elif role == "user":
+                            print(f"  {i+1}. [{role.upper()}] {content}")
+                        elif role == "assistant":
+                            if msg.get("tool_calls"):
+                                print(f"  {i+1}. [{role.upper()}] Tool calls: {len(msg['tool_calls'])} calls")
+                            else:
+                                print(f"  {i+1}. [{role.upper()}] {content}")
+                        elif role == "tool":
+                            tool_call_id = msg.get("tool_call_id", "unknown")
+                            print(f"  {i+1}. [{role.upper()}] Tool result (ID: {tool_call_id})")
+                    print("📋 END CONVERSATION HISTORY\n")
 
                     # Make the final AI call to generate the response
                     final_response = client.chat.completions.create(

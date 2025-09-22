@@ -24,6 +24,25 @@ from .specialty_matcher import SpecialtyDataCache, get_recommended_specialty
 # Set up improved logging at startup
 setup_improved_logging()
 
+# Configure comprehensive logging for FastAPI and uvicorn
+import logging
+from src.agent import setup_detailed_logging
+
+# Setup comprehensive logging that captures everything
+logger = setup_detailed_logging()
+
+# Configure FastAPI logging
+logging.getLogger("fastapi").setLevel(logging.INFO)
+logging.getLogger("fastapi").propagate = True
+
+# Configure uvicorn logging
+logging.getLogger("uvicorn").setLevel(logging.INFO)
+logging.getLogger("uvicorn").propagate = True
+logging.getLogger("uvicorn.access").setLevel(logging.INFO)
+logging.getLogger("uvicorn.access").propagate = True
+logging.getLogger("uvicorn.error").setLevel(logging.INFO)
+logging.getLogger("uvicorn.error").propagate = True
+
 # Preload specialty data cache at application startup
 logger = logging.getLogger(__name__)
 logger.info("Preloading specialty data cache at application startup")
