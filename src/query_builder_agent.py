@@ -1,5 +1,6 @@
 import os
 import logging
+import re
 from typing import Dict, List, Optional, Tuple, Any, Union
 from pydantic import BaseModel
 from sqlalchemy import text
@@ -11,6 +12,7 @@ import time
 from openai import OpenAI
 import uuid
 import json
+from jellyfish import metaphone
 
 
 # Initialize thread_local storage
@@ -62,6 +64,252 @@ class SearchCriteria(BaseModel):
             return {k: v for k, v in result.items() if v is not None}
         return result
 
+def post_process_doctor_data(raw_doctors: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Post-process doctor data to group branches under single doctor objects.
+    
+    The stored procedure returns individual rows for each doctor-branch combination.
+    This function groups them by doctor ID and creates the desired structure.
+    
+    Args:
+        raw_doctors: List of raw doctor records from stored procedure
+        
+    Returns:
+        List of processed doctor objects with grouped branches
+    """
+    if not raw_doctors:
+        return []
+    
+    logger.info(f"🔄 POST-PROCESSING: Starting post-processing of {len(raw_doctors)} raw doctor records")
+    
+    # Group doctors by their unique identifier (Id field)
+    doctors_dict = {}
+    
+    for record in raw_doctors:
+        # Map the actual field names from stored procedure to our expected names
+        doctor_id = record.get('DoctorId')  # Changed from 'Id' to 'DoctorId'
+        if not doctor_id:
+            logger.warning(f"⚠️ POST-PROCESSING: Skipping record without DoctorId: {record}")
+            continue
+            
+        # If this is the first time we see this doctor, create the base doctor object
+        if doctor_id not in doctors_dict:
+            # Create the main doctor object with only the fields that are actually available from stored procedure
+            doctor_obj = {
+                "Id": record.get('DoctorId'),  # Map DoctorId to Id
+                "Specialty": record.get('Speciality'),  # Map Speciality to Specialty
+                "DocName_en": record.get('DoctorName_en'),  # Map DoctorName_en to DocName_en
+                "DocName_ar": record.get('DoctorName_ar'),  # Map DoctorName_ar to DocName_ar
+                "SubspecialityNames": record.get('Subspecialities'),  # Map Subspecialities to SubspecialityNames
+                "Rating": record.get('Rating'),
+                "Experience": record.get('Experience'),
+                "Gender": record.get('Gender'),
+                "branches": []
+            }
+            doctors_dict[doctor_id] = doctor_obj
+            logger.info(f"🔄 POST-PROCESSING: Created new doctor object for ID {doctor_id}: {record.get('DoctorName_en')}")
+        
+        # Create branch object for this record with only available fields
+        branch_obj = {
+            "BranchId": record.get('BranchId'),
+            "Fee": record.get('Fee'),
+            "HasDiscount": record.get('HasDiscount'),
+            "isActive": record.get('IsActive'),  # Map IsActive to isActive
+            "BranchName_en": record.get('Branch_en'),  # Map Branch_en to BranchName_en
+            "BranchName_ar": record.get('Branch_ar'),  # Map Branch_ar to BranchName_ar
+            "Address_en": record.get('Address_en'),  # Map Address_en to Address_en
+            "Address_ar": record.get('Address_ar'),  # Map Address_ar to Address_ar
+            "Distancekm": record.get('Distance')  # Map Distance to Distancekm
+        }
+        
+        # Add discount information if present
+        if record.get('HasDiscount') and record.get('DiscountValue') and record.get('DiscountValue') > 0:
+            branch_obj["discount"] = {
+                "DiscountType": record.get('DiscountType'),  # Map DiscountType
+                "DiscountValue": record.get('DiscountValue')  # Map DiscountValue
+            }
+        
+        # Note: Promotion and boasting fields are not available in the current stored procedure
+        # They can be added later if the stored procedure is updated to include these fields
+        
+        # Add the branch to the doctor's branches array
+        doctors_dict[doctor_id]["branches"].append(branch_obj)
+        logger.info(f"🔄 POST-PROCESSING: Added branch {record.get('Branch_en', 'Unknown')} to doctor {doctor_id}")
+    
+    # Convert dictionary back to list
+    processed_doctors = list(doctors_dict.values())
+    
+    logger.info(f"🔄 POST-PROCESSING: Completed post-processing. {len(raw_doctors)} raw records -> {len(processed_doctors)} unique doctors")
+    
+    # Log summary of branches per doctor
+    for doctor in processed_doctors:
+        branch_count = len(doctor.get('branches', []))
+        logger.info(f"🔄 POST-PROCESSING: Doctor {doctor.get('DocName_en', 'Unknown')} has {branch_count} branches")
+    
+    return processed_doctors
+
+
+def generate_sound_name(name: str) -> str:
+    """Generate sound name using metaphone phonetic encoding."""
+    if not name or not name.strip():
+        return ""
+    
+    words = name.split()
+    phonetic_codes = [metaphone(word) for word in words]
+    return ' '.join(phonetic_codes)
+
+
+def clean_and_generate_sound_name(user_input: str) -> str:
+    """Clean user input and generate sound name for database matching."""
+    if not user_input:
+        return ""
+    
+    # Remove doctor prefixes
+    prefixes_to_remove = ['dr.', 'dr', 'doctor', 'prof.', 'prof', 'professor']
+    name_lower = user_input.lower().strip()
+    
+    for prefix in prefixes_to_remove:
+        if name_lower.startswith(prefix + ' '):
+            user_input = user_input[len(prefix):].strip()
+            break
+        elif name_lower.startswith(prefix):
+            user_input = user_input[len(prefix):].strip()
+            break
+    
+    cleaned_name = ' '.join(user_input.split())
+    return generate_sound_name(cleaned_name)
+
+
+def build_doctor_sound_name_clause(doctor_name: str) -> str:
+    """
+    Build a WHERE clause for doctor name search.
+    Since we're now using @NameSound parameter in the stored procedure,
+    this function returns an empty string as the sound matching is handled
+    by the stored procedure itself.
+
+    :param doctor_name: The doctor name to search for
+    :return: Empty string since sound matching is handled by @NameSound parameter
+    """
+    if not doctor_name or not doctor_name.strip():
+        return ""
+    
+    # Generate sound name for logging purposes
+    sound_name = clean_and_generate_sound_name(doctor_name)
+    
+    logger.info(f"🔊 DOCTOR SOUND SEARCH: Original='{doctor_name}' -> Sound='{sound_name}' (handled by @NameSound parameter)")
+    
+    # Return empty string since sound matching is now handled by the stored procedure
+    # via the @NameSound parameter
+    return ""
+
+
+def test_post_processing():
+    """
+    Test function to demonstrate the post-processing functionality
+    """
+    # Sample raw data that would come from the stored procedure
+    sample_raw_data = [
+        {
+            "Id": 2,
+            "Specialty": "Dentistry",
+            "DocName_en": "Saleh Alanazi",
+            "DocName_ar": "صالح العنزي",
+            "creationDate": "2025-03-28T16:47:27",
+            "subspeciality_id": "1",
+            "SubspecialityNames": "Orthodontics",
+            "Email": "noemail@gmail.com",
+            "DocContact": "114222213",
+            "ImageUrl": "",
+            "SourceOfRatting": "null",
+            "Certificate": "",
+            "Others": "https://cdn1.dsmart.ai/file.pdf",
+            "Doc_Id": "",
+            "Rating": "0.4",
+            "DoctorLicense": "000013",
+            "LicenseExpiryDate": "2027-01-01",
+            "LicenseAttachment": "https://cdn1.dsmart.ai/file.pdf",
+            "Experience": 15.0,
+            "Gender": "MALE",
+            "slug": "saleh-alanazi-orthodontics",
+            "BranchId": 3,
+            "Fee": "200",
+            "discount_id": None,
+            "boasting_id": None,
+            "promo_id": None,
+            "HasDiscount": False,
+            "isActive": True,
+            "BranchName_en": "Loran Dental Clinics",
+            "BranchName_ar": "عيادات لوران لطب الأسنان",
+            "Address_en": "King Abdullah Branch Rd, Ar Rahmaniyyah, Riyadh 12343",
+            "Address_ar": "طريق الملك عبدالله الفرعي، الرحمانية، الرياض 12343",
+            "Lat": 24.725378395500517,
+            "Long": 46.65942369787483,
+            "branch_slug": "loran-dental-clinics",
+            "Distancekm": 2.0704664209809427
+        },
+        {
+            "Id": 2,  # Same doctor ID
+            "Specialty": "Dentistry",
+            "DocName_en": "Saleh Alanazi",
+            "DocName_ar": "صالح العنزي",
+            "creationDate": "2025-03-28T16:47:27",
+            "subspeciality_id": "1",
+            "SubspecialityNames": "Orthodontics",
+            "Email": "noemail@gmail.com",
+            "DocContact": "114222213",
+            "ImageUrl": "",
+            "SourceOfRatting": "null",
+            "Certificate": "",
+            "Others": "https://cdn1.dsmart.ai/file.pdf",
+            "Doc_Id": "",
+            "Rating": "0.4",
+            "DoctorLicense": "000013",
+            "LicenseExpiryDate": "2027-01-01",
+            "LicenseAttachment": "https://cdn1.dsmart.ai/file.pdf",
+            "Experience": 15.0,
+            "Gender": "MALE",
+            "slug": "saleh-alanazi-orthodontics",
+            "BranchId": 2,  # Different branch
+            "Fee": "100",
+            "discount_id": 6,
+            "boasting_id": 5,
+            "promo_id": 1,
+            "HasDiscount": True,
+            "isActive": True,
+            "BranchName_en": "Glam Clinics",
+            "BranchName_ar": "عيادات جلام",
+            "Address_en": "Khurais Road, Al Rawdah District, Riyadh",
+            "Address_ar": "طريق خريص، حي الروضة، الرياض",
+            "Lat": 24.72354638962412,
+            "Long": 46.77465531349246,
+            "branch_slug": "glam-clinics",
+            "Distancekm": 1.5234567890123456,  # Different distance for this branch
+            "discount_CreationDate": "2025-08-16T19:08:34",
+            "discount_DiscountType": "percentage",
+            "discount_DiscountValue": 50.0,
+            "discount_DiscountTill": "2025-10-22T00:00:00",
+            "promo_PromoType": "percentage",
+            "promo_PromoValue": 20.0,
+            "promo_PromoTill": "2025-10-22T19:00:00",
+            "promo_PromoName": "Testing Promotion",
+            "boasting_BoastingType": "silver",
+            "boasting_BoastingTill": "2025-10-23T19:00:00"
+        }
+    ]
+    
+    print("🧪 Testing post-processing functionality...")
+    print(f"📊 Input: {len(sample_raw_data)} raw records")
+    
+    # Apply post-processing
+    processed_result = post_process_doctor_data(sample_raw_data)
+    
+    print(f"📊 Output: {len(processed_result)} unique doctors")
+    print(f"📊 Sample processed doctor:")
+    print(json.dumps(processed_result[0], indent=2, ensure_ascii=False))
+    
+    return processed_result
+
+
 def clean_subspeciality(subspeciality: str) -> str:
     """
     Extract only the first subspeciality before any comma.
@@ -100,15 +348,15 @@ def clean_subspeciality(subspeciality: str) -> str:
     
     return cleaned
 
-def build_query(criteria: SearchCriteria) -> Tuple[str, Dict[str, Any]]:
+def build_query(criteria: SearchCriteria) -> Dict[str, Any]:
     """
-    Build parameters for Sp_IntelligentSearch stored procedure
+    Build parameters for Sp_IntelligentSearch stored procedure and execute it
     
     Args:
         criteria: SearchCriteria object containing search parameters
         
     Returns:
-        Tuple of (stored procedure name, parameters dictionary)
+        Dictionary containing the search results from the stored procedure
     """
     try:
         # Log the criteria we're using
@@ -137,9 +385,9 @@ def build_query(criteria: SearchCriteria) -> Tuple[str, Dict[str, Any]]:
         #     #where_conditions.append(f"AND (bg.BranchName_en LIKE N'%{branch_name}%' OR bg.BranchName_ar LIKE N'%{branch_name}%')")
         #    where_conditions.append( f"""AND (SELECT STRING_AGG( N'(bg.BranchName_en LIKE N''%'+ value + N'%'' OR bg.BranchName_ar LIKE N''%'+ value + N'%'' )', N' AND ')FROM STRING_SPLIT(N'{branch_name}', N' ')) = (N'(bg.BranchName_en LIKE N''%{branch_name}%'' OR bg.BranchName_ar LIKE N''%{branch_name}%'')')""")
 
-        # Doctor name search (high priority)
+        # Doctor name search (high priority) - using sound name for phonetic matching
         if criteria.doctor_name:
-            where_conditions.append(build_multi_word_like_clause("le.DocName", criteria.doctor_name))
+            where_conditions.append(build_doctor_sound_name_clause(criteria.doctor_name))
 
         # Hospital/branch name search
         if criteria.branch_name:
@@ -216,11 +464,19 @@ def build_query(criteria: SearchCriteria) -> Tuple[str, Dict[str, Any]]:
             
         logger.info(f"Built WHERE clause: {where_clause}")
         
-        # Create parameters dictionary with latitude, longitude, and WHERE clause
+        # Generate sound name for doctor search if doctor name is provided
+        name_sound = ""
+        if criteria.doctor_name:
+            name_sound = clean_and_generate_sound_name(criteria.doctor_name)
+            logger.info(f"🔊 Generated sound name: '{criteria.doctor_name}' -> '{name_sound}'")
+        
+        # Create parameters dictionary with latitude, longitude, name sound, and WHERE clause
         params = {
             "@Latitude": criteria.latitude if criteria.latitude is not None else 0.0,
             "@Longitude": criteria.longitude if criteria.longitude is not None else 0.0,
-            "@DynamicWhereClause": where_clause
+            "@NameSound": name_sound,
+            "@DynamicWhereClause": where_clause,
+            "@BoostedOnly": 0
         }
         
         logger.info(f"Using coordinates: Lat={params['@Latitude']}, Long={params['@Longitude']}")
@@ -232,6 +488,18 @@ def build_query(criteria: SearchCriteria) -> Tuple[str, Dict[str, Any]]:
         
         result = db.execute_stored_procedure(sp_name, params)
         logger.info(f"🔍 DOCTOR SEARCH: Database returned result: {json.dumps(result, indent=2)}")
+        
+        # Post-process the doctor data to group branches
+        if result and "data" in result and "doctors" in result["data"]:
+            raw_doctors = result["data"]["doctors"]
+            logger.info(f"🔄 POST-PROCESSING: Raw doctors count: {len(raw_doctors)}")
+            
+            # Apply post-processing to group branches under doctors
+            processed_doctors = post_process_doctor_data(raw_doctors)
+            
+            # Update the result with processed data
+            result["data"]["doctors"] = processed_doctors
+            logger.info(f"🔄 POST-PROCESSING: Processed doctors count: {len(processed_doctors)}")
         
         # Return stored procedure name and parameters
         return result
