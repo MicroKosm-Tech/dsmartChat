@@ -48,14 +48,15 @@ class SearchCriteria(BaseModel):
     latitude: Optional[float] = None
     longitude: Optional[float] = None
     min_rating: Optional[float] = None
-    max_price: Optional[float] = None
-    min_price: Optional[float] = None
-    min_experience: Optional[float] = None
+    max_price: Optional[int] = None
+    min_price: Optional[int] = None
+    min_experience: Optional[int] = None
     gender: Optional[str] = None
     hospital_name: Optional[str] = None
     branch_name: Optional[str] = None
     doctor_name: Optional[str] = None
     original_message: Optional[str] = None
+    has_discount: Optional[int] = None
     
     def dict(self, exclude_none: bool = False, **kwargs):
         """Return dictionary representation with option to exclude None values"""
@@ -442,16 +443,28 @@ def build_query(criteria: SearchCriteria) -> Dict[str, Any]:
             where_conditions.append(f"AND le.Rating >= {float(criteria.min_rating)}")
         
         # Price/fee filters
-        if criteria.min_price is not None and criteria.max_price is not None:
-            where_conditions.append(f"AND le.Fee BETWEEN {float(criteria.min_price)} AND {float(criteria.max_price)}")
-        elif criteria.min_price is not None:
-            where_conditions.append(f"AND le.Fee >= {float(criteria.min_price)}")
-        elif criteria.max_price is not None:
-            where_conditions.append(f"AND le.Fee <= {float(criteria.max_price)}")
+        
+        min_price = criteria.min_price
+        max_price = criteria.max_price
+        
+        if isinstance(criteria.min_price, float):
+            min_price = int(criteria.min_price)
+        if isinstance(criteria.max_price, float):
+            max_price = int(criteria.max_price)
+        
+        if min_price is not None and max_price is not None:
+            where_conditions.append(f"AND ble.Fee BETWEEN {min_price} AND {max_price}")
+        elif min_price is not None:
+            where_conditions.append(f"AND ble.Fee >= {min_price}")
+        elif max_price is not None:
+            where_conditions.append(f"AND ble.Fee <= {max_price}")
         
         # Experience filter
         if criteria.min_experience is not None:
             where_conditions.append(f"AND le.Experience >= {float(criteria.min_experience)}")
+            
+        if criteria.has_discount is not None:
+            where_conditions.append(f"AND ble.HasDiscount = {criteria.has_discount}")
         
         # Gender filter
         if criteria.gender:
@@ -1033,16 +1046,17 @@ def extract_search_criteria_from_message(message: str) -> Dict[str, Any]:
         # Prepare prompt for criteria extraction
         system_prompt = """Extract search criteria from the user's message into a structured format. Focus on:
         - Specialty/type of doctor (e.g., dentistry, cardiology, pediatrics) - ALWAYS in English
-        - Price range (min and max in SAR) in western numbers
+        - Price range (min and max in SAR) in western numbers without decimals (100, 200, 300, etc.)
         - Rating requirements (minimum rating out of 5) in western numbers
         - Experience requirements (minimum years) in western numbers
-        - Doctor name if mentioned (with title Dr/Doctor removed) - KEEP in original language (Arabic/English)
+        - Doctor name if mentioned (with title Dr/Doctor removed) - ALWAYS in English (If not mentioned in english, convert it to english)
         - Clinic/branch name if mentioned - KEEP in original language (Arabic/English)
         - Gender preference ('male' or 'female' doctor) - ALWAYS in English
+        - Has Discount (0 or 1) - If user asks for discount, set to 1, otherwise set to 0
         
         IMPORTANT RULES:
-        1. Doctor names and branch names:
-           - Keep in original language (Arabic or English)
+        1. Doctor names:
+           - Keep in english language
            - Remove titles like "Dr.", "Doctor", "الدكتور", "دكتور", "د.", "دكتر", "دكتوره", "دكتورة"
            - For Arabic names, pay special attention to these patterns:
              * "الدكتور [name]" -> extract "[name]"
@@ -1064,22 +1078,22 @@ def extract_search_criteria_from_message(message: str) -> Dict[str, Any]:
              * "مع [name]" -> extract "[name]" (if context suggests it's a doctor)
            - Examples:
              * "Dr. Smith" -> "Smith"
-             * "الدكتور أحمد" -> "أحمد"
-             * "دكتور محمد" -> "محمد"
-             * "ابحث عن الدكتور الغريب" -> "الغريب"
-             * "اريد الدكتور يوسف" -> "يوسف"
-             * "عايز الدكتور علي" -> "علي"
-             * "عند الدكتور خالد" -> "خالد"
-             * "مع الدكتور سعيد" -> "سعيد"
-             * "ابحث عن الغريب" -> "الغريب"
-             * "اريد يوسف" -> "يوسف"
-             * "عايز علي" -> "علي"
-             * "عند خالد" -> "خالد"
-             * "مع سعيد" -> "سعيد"
-             * "مستشفى الملك فهد" -> "مستشفى الملك فهد"
+             * "الدكتور أحمد" -> "Ahmed"
+             * "دكتور محمد" -> "Mohamed"
+             * "ابحث عن الدكتور الغريب" -> "Algahreeb"
+             * "اريد الدكتور يوسف" -> "Yousef"
+             * "عايز الدكتور علي" -> "Ali"
+             * "عند الدكتور خالد" -> "Khalid"
+             * "مع الدكتور سعيد" -> "Saeed"
+             * "ابحث عن الغريب" -> "Algahreeb"
+             * "اريد يوسف" -> "Yousef"
+             * "عايز علي" -> "Ali"
+             * "عند خالد" -> "Khalid"
+             * "مع سعيد" -> "Saeed"
+             * "مستشفى الملك فهد" -> "King Fahd Hospital"
              * "King Fahd Hospital" -> "King Fahd Hospital"
         
-        2. Branch/Clinic name extraction for offers:
+        2. Branch/Clinic name extraction for offers and doctor search:
            - Pay special attention to offers-related queries
            - Look for patterns like "offers from [clinic]", "offers at [clinic]", "offers in [clinic]"
            - Extract the clinic/branch name even if no specialty is mentioned
@@ -1161,9 +1175,10 @@ def extract_search_criteria_from_message(message: str) -> Dict[str, Any]:
             "max_price": number,
             "min_rating": number,
             "min_experience": number,
-            "doctor_name": "name (in original language)",
+            "doctor_name": "name (in english)",
             "branch_name": "name (in original language)",
-            "gender": "male" or "female"
+            "gender": "male" or "female",
+            "has_discount": 0 or 1
         }
         """
         
