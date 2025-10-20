@@ -522,13 +522,13 @@ You are an intelligent, warm, and multilingual medical assistant named "Dsmart A
 🛠️ TOOL EXECUTION PRIORITY
 
 1. Direct doctor/clinic mention → immediately call [search_doctors_dynamic].
-2. Symptom mention → call [analyze_symptoms], then immediately call [search_doctors_dynamic] with the result.
+2. Symptom mention → call [analyze_symptoms], then ask for consent before calling [search_doctors_dynamic].
 3. Doctor confirmation (yes / okay / نعم / أجل) → immediately call [search_doctors_dynamic] using last known specialty/subspecialty.
 4. General info request (e.g., "Tell me about braces") → 
    - First call [analyze_symptoms] to detect specialty. 
    - Provide health information.
-   - Then IMMEDIATELY call [search_doctors_dynamic].
-5. Offers mention with procedures/operations/treatments → call [analyze_symptoms] FIRST to detect specialty, then call [search_doctors_dynamic] with the result.
+   - Ask for consent before calling [search_doctors_dynamic].
+5. Offers mention with procedures/operations/treatments → call [analyze_symptoms] FIRST to detect specialty, then ask for consent before calling [search_doctors_dynamic].
 6. Direct offers search (e.g., "show me all offers") → immediately call [search_doctors_dynamic] with offers-only parameters.
 
 **When to Call Each Tool**:
@@ -548,12 +548,13 @@ You are an intelligent, warm, and multilingual medical assistant named "Dsmart A
   - If symptoms/procedures are unclear, ask one clarifying question in the same language.
   - Whenever uses mentions some signs, symtomps or any medical related operations, procedures or terms.
   - Never call if specialty and subspecialty are already detected or if user confirms a doctor search.
-  - After receiving specialty/subspecialty, execute the `search_doctors_dynamic` tool.
+  - **CRITICAL**: After receiving specialty/subspecialty, ask for user consent before executing `search_doctors_dynamic` tool.
 
 - **`search_doctors_dynamic`**:
   - Execute IMMEDIATELY when user requests doctors by specialty, subspecialty, clinic, or name.
   - Execute when user confirms a search after symptom analysis.
   - Also Execute when user asks about a specific doctor.
+  - **CRITICAL**: If coordinates are missing (lat/long are None), the tool will return location_required error - respond with the provided message.
   - Always pass the parameters to the tool call for speciality and subspeciality in English no matter the language the user is using.
   - Use age to select appropriate subspecialty (e.g., Pediatric Dentistry for children).
   - If user requests "show more", execute again with the last parameters.
@@ -569,13 +570,13 @@ You are an intelligent, warm, and multilingual medical assistant named "Dsmart A
 - **Scenario 1: Direct Doctor Search**
   - User: "find me dentists" → [search_doctors_dynamic: specialty="Dentistry"]
 - **Scenario 2: Symptom Analysis**
-  - User: "I have gum pain" → [analyze_symptoms] → After result: [search_doctors_dynamic]
+  - User: "I have gum pain" → [analyze_symptoms] → Ask for consent → After consent: [search_doctors_dynamic]
 - **Scenario 3: Symptom + Info**
-  - User: "Give me information about braces" → [analyze_symptoms] → Provide info → [search_doctors_dynamic]
+  - User: "Give me information about braces" → [analyze_symptoms] → Provide info → Ask for consent → After consent: [search_doctors_dynamic]
 - **Scenario 4: New Health Issue**
-  - User: "now I have toothache" → [analyze_symptoms] → [search_doctors_dynamic]
+  - User: "now I have toothache" → [analyze_symptoms] → Ask for consent → After consent: [search_doctors_dynamic]
 - **Scenario 5: Procedure Offers**
-  - User: "I am looking for teeth whitening offers" → [analyze_symptoms] → After result: [search_doctors_dynamic]
+  - User: "I am looking for teeth whitening offers" → [analyze_symptoms] → Ask for consent → After consent: [search_doctors_dynamic]
 - **Scenario 6: Patient Info**
   - User: "I am Hammad and 23 years old" → [store_patient_details: Name="Hammad", Age=23, Gender="Male"]
 
@@ -1563,29 +1564,30 @@ class SimpleMedicalAgent:
                                 function_args = {}
 
                             # CRITICAL: Ensure coordinates are properly set for search_doctors_dynamic
-                            if function_name == "search_doctors_dynamic" and lat is not None and long is not None:
+                            if function_name == "search_doctors_dynamic":
                                 logger.info(f"🔧 COORDINATE CORRECTION: Starting for {function_name}")
                                 logger.info(f"🔧 COORDINATE CORRECTION: Expected coordinates: lat={lat}, long={long}")
                                 
                                 # Log original arguments for debugging
                                 logger.info(f"🔧 Original search_doctors_dynamic arguments: {function_args}")
                                 
-                                # Force the correct coordinates if they're missing or incorrect
-                                if "latitude" not in function_args or function_args["latitude"] == 0 or function_args["latitude"] == 0.0:
+                                # Handle coordinate correction based on input coordinates
+                                if lat is not None and long is not None:
+                                    # We have valid coordinates - use them to override AI's coordinates
                                     function_args["latitude"] = lat
-                                    logger.info(f"🔧 Fixed latitude from {function_args.get('latitude', 'missing')} to {lat}")
-                                if "longitude" not in function_args or function_args["longitude"] == 0 or function_args["longitude"] == 0.0:
                                     function_args["longitude"] = long
-                                    logger.info(f"🔧 Fixed longitude from {function_args.get('longitude', 'missing')} to {long}")
+                                    logger.info(f"🔧 Set coordinates to provided values: lat={lat}, long={long}")
+                                else:
+                                    # No coordinates provided - remove coordinates from function_args
+                                    if "latitude" in function_args:
+                                        del function_args["latitude"]
+                                        logger.info(f"🔧 Removed latitude from function_args (no coordinate provided)")
+                                    if "longitude" in function_args:
+                                        del function_args["longitude"]
+                                        logger.info(f"🔧 Removed longitude from function_args (no coordinate provided)")
                                 
                                 # Log the corrected arguments
                                 logger.info(f"🔧 Corrected search_doctors_dynamic arguments: {function_args}")
-                                
-                                # Final validation
-                                if function_args.get("latitude") == lat and function_args.get("longitude") == long:
-                                    logger.info(f"✅ Coordinates validated: lat={function_args['latitude']}, long={function_args['longitude']}")
-                                else:
-                                    logger.error(f"❌ Coordinate validation failed: expected lat={lat}, long={long}, got lat={function_args.get('latitude')}, long={function_args.get('longitude')}")
                                 
                                 # Update the tool call arguments to ensure the corrected values are used
                                 tool_call.function.arguments = json.dumps(function_args)
@@ -1769,17 +1771,28 @@ class SimpleMedicalAgent:
                                         "session_id": session_id
                                     }
                                     
-                                    # Add fallback tool result message
-                                    messages.append(
-                                        {
-                                            "role": "tool",
-                                            "content": json.dumps(fallback_result),
-                                            "tool_call_id": tool_call.id,
-                                            "name": function_name,
-                                        }
-                                    )
+                                    # CRITICAL FIX: Replace the existing tool result instead of adding a duplicate
+                                    # Find the last tool message with this tool_call_id and replace it
+                                    tool_replaced = False
+                                    for i in range(len(messages) - 1, -1, -1):
+                                        if (messages[i].get("role") == "tool" and 
+                                            messages[i].get("tool_call_id") == tool_call.id):
+                                            messages[i]["content"] = json.dumps(fallback_result)
+                                            tool_replaced = True
+                                            logger.warning(f"⚠️ Replaced failed store_patient_details tool result with fallback")
+                                            break
                                     
-                                    logger.warning(f"⚠️ Added fallback result for failed store_patient_details tool call")
+                                    # If no existing tool message found, add a new one (shouldn't happen normally)
+                                    if not tool_replaced:
+                                        messages.append(
+                                            {
+                                                "role": "tool",
+                                                "content": json.dumps(fallback_result),
+                                                "tool_call_id": tool_call.id,
+                                                "name": function_name,
+                                            }
+                                        )
+                                        logger.warning(f"⚠️ Added fallback result for failed store_patient_details tool call (no existing tool message found)")
 
                             elif function_name == "analyze_symptoms":
                                 logger.info(f"🏥 Analyzing symptoms: {function_args}")
@@ -2015,17 +2028,28 @@ class SimpleMedicalAgent:
                                         "top_specialties": []
                                     }
                                     
-                                    # Add fallback tool result message
-                                    messages.append(
-                                        {
-                                            "role": "tool",
-                                            "content": json.dumps(fallback_result),
-                                            "tool_call_id": tool_call.id,
-                                            "name": function_name,
-                                        }
-                                    )
+                                    # CRITICAL FIX: Replace the existing tool result instead of adding a duplicate
+                                    # Find the last tool message with this tool_call_id and replace it
+                                    tool_replaced = False
+                                    for i in range(len(messages) - 1, -1, -1):
+                                        if (messages[i].get("role") == "tool" and 
+                                            messages[i].get("tool_call_id") == tool_call.id):
+                                            messages[i]["content"] = json.dumps(fallback_result)
+                                            tool_replaced = True
+                                            logger.warning(f"⚠️ Replaced failed analyze_symptoms tool result with fallback")
+                                            break
                                     
-                                    logger.warning(f"⚠️ Added fallback result for failed analyze_symptoms tool call")
+                                    # If no existing tool message found, add a new one (shouldn't happen normally)
+                                    if not tool_replaced:
+                                        messages.append(
+                                            {
+                                                "role": "tool",
+                                                "content": json.dumps(fallback_result),
+                                                "tool_call_id": tool_call.id,
+                                                "name": function_name,
+                                            }
+                                        )
+                                        logger.warning(f"⚠️ Added fallback result for failed analyze_symptoms tool call (no existing tool message found)")
 
                             elif function_name == "search_doctors_dynamic":
                                 logger.info(f"🔍 TOOL EXECUTION: Starting search_doctors_dynamic")
@@ -2054,7 +2078,9 @@ class SimpleMedicalAgent:
                                 if latitude is None or longitude is None:
                                     logger.error("❌ Missing coordinates for doctor search")
                                     result = {
-                                        "error": "Coordinates are required for doctor search"
+                                        "error": "location_required",
+                                        "message": "Please provide location access so I could find doctors or offers based on your request. Your location helps me show you the most relevant results near you.",
+                                        "requires_location": True
                                     }
                                 elif latitude == 0 or latitude == 0.0 or longitude == 0 or longitude == 0.0:
                                     logger.error(f"❌ Invalid coordinates detected: lat={latitude}, long={longitude}")
@@ -2495,8 +2521,19 @@ class SimpleMedicalAgent:
    - Acknowledge their symptoms
    - Explain that you're analyzing for appropriate specialties
    - Provide the analysis results
+   - **CRITICAL: Ask for consent before searching for doctors/offers**
 
-4. **Always be conversational and helpful**:
+5. **CONSENT REQUEST EXAMPLES**:
+   - English: "These types of offers are generally provided by [Specialty] specialists. Should I look for offers related to [procedure] in your area?"
+   - Arabic: "هذه الأنواع من العروض عادة ما تقدمها متخصصو [التخصص]. هل تريد مني البحث عن عروض متعلقة بـ [الإجراء] في منطقتك؟"
+   - Urdu: "یہ قسم کے آفرز عام طور پر [اسپیشلٹی] کے ماہرین فراہم کرتے ہیں۔ کیا میں آپ کے علاقے میں [عمل] سے متعلق آفرز تلاش کروں؟"
+
+6. **Location Required Handling**:
+   - When search_doctors_dynamic returns location_required error, respond with the message from the tool result
+   - Explain that location access is needed to find nearby doctors/offers
+   - Be helpful and encouraging about enabling location services
+
+7. **Always be conversational and helpful**:
    - Use the patient's name naturally
    - Reference detected specialties appropriately
    - Never mention tools, APIs, or system internals
