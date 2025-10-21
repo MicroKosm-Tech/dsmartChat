@@ -942,6 +942,16 @@ def analyze_symptoms(symptom_description: str) -> Dict[str, Any]:
         # Create a simpler output format
         simplified_result = {}
         
+        # Handle greeting/no-symptoms case first
+        if result.get("status") == "no_symptoms" and not result.get("is_describing_symptoms", False):
+            logger.info(f"DETAILED DEBUG: Message detected as greeting/no-symptoms: {result.get('message', 'Unknown')}")
+            return {
+                "speciality_not_available": False,
+                "symptoms_detected": [],
+                "top_specialties": [],
+                "detailed_analysis": result
+            }
+        
         # Check if specialty is not available in database
         speciality_not_available = False
         if "symptom_analysis" in result and "speciality_not_available" in result["symptom_analysis"]:
