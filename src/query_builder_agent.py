@@ -483,14 +483,18 @@ def build_query(criteria: SearchCriteria) -> Dict[str, Any]:
             name_sound = clean_and_generate_sound_name(criteria.doctor_name)
             logger.info(f"🔊 Generated sound name: '{criteria.doctor_name}' -> '{name_sound}'")
         
-        # Create parameters dictionary with latitude, longitude, name sound, and WHERE clause
+        # Create parameters dictionary - only include parameters with meaningful values
+        # The stored procedure may not accept empty strings for optional parameters
         params = {
             "@Latitude": criteria.latitude if criteria.latitude is not None else 0.0,
             "@Longitude": criteria.longitude if criteria.longitude is not None else 0.0,
-            "@NameSound": name_sound,
             "@DynamicWhereClause": where_clause,
             "@BoostedOnly": 0
         }
+        
+        # Only add @NameSound if it's not empty (stored procedure may not accept empty strings)
+        if name_sound:
+            params["@NameSound"] = name_sound
         
         logger.info(f"Using coordinates: Lat={params['@Latitude']}, Long={params['@Longitude']}")
         
